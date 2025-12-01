@@ -90,12 +90,24 @@ class ConsulClient:
             host = addr_clean
             port = 8500
 
-        self._client = consul.Consul(
-            host=host,
-            port=port,
-            token=self.token,
-            scheme=scheme,
-        )
+        # python-consul reads CONSUL_HTTP_ADDR internally and expects host:port format,
+        # but HashiCorp's standard allows URLs with scheme (e.g., http://host:port).
+        # Temporarily set the env var to host:port format for python-consul compatibility.
+        original_addr = os.environ.get("CONSUL_HTTP_ADDR")
+        os.environ["CONSUL_HTTP_ADDR"] = f"{host}:{port}"
+        try:
+            self._client = consul.Consul(
+                host=host,
+                port=port,
+                token=self.token,
+                scheme=scheme,
+            )
+        finally:
+            # Restore the original environment variable
+            if original_addr is not None:
+                os.environ["CONSUL_HTTP_ADDR"] = original_addr
+            else:
+                os.environ.pop("CONSUL_HTTP_ADDR", None)
         self._conventions_cache: dict[str, Any] | None = None
 
     def get_kv(self, key: str) -> ConsulKVEntry | None:
