@@ -26,10 +26,10 @@ console = Console()
 
 @app.command()
 def generate(
-    prompt: str = typer.Option(
-        ...,
+    prompt: Optional[str] = typer.Option(
+        None,
         "--prompt", "-p",
-        help="Deployment request (e.g., 'Deploy a Node.js API')",
+        help="Deployment request. If not provided, will be asked interactively after analysis.",
     ),
     path: str = typer.Option(
         ...,
@@ -66,11 +66,11 @@ def generate(
 
     Examples:
 
-        nomad-spec generate -p "Deploy this API" --path ./my-app
+        nomad-spec generate --path ./my-app
 
         nomad-spec generate -p "Deploy nginx" --path . -o job.nomad
 
-        nomad-spec generate -p "Create job" --path https://github.com/user/repo
+        nomad-spec generate --path https://github.com/user/repo
     """
     settings = get_settings()
 
@@ -82,13 +82,19 @@ def generate(
         console.print(f"[red]Error:[/red] Path does not exist: {path}")
         raise typer.Exit(code=1)
 
-    console.print(Panel(
-        f"[bold]Nomad Job Spec Generator[/bold]\n\n"
-        f"Prompt: {prompt}\n"
-        f"Codebase: {path}\n"
-        f"Cluster: {cluster_id}",
-        title="Configuration",
-    ))
+    # Handle --no-questions without prompt: use default
+    if no_questions and not prompt:
+        prompt = "Deploy this application"
+
+    # Show initial configuration if prompt was provided
+    if prompt:
+        console.print(Panel(
+            f"[bold]Nomad Job Spec Generator[/bold]\n\n"
+            f"Prompt: {prompt}\n"
+            f"Codebase: {path}\n"
+            f"Cluster: {cluster_id}",
+            title="Configuration",
+        ))
 
     # Initialize LLM
     with console.status("[bold green]Initializing LLM..."):
@@ -106,10 +112,10 @@ def generate(
         enable_checkpointing=not no_questions,
     )
 
-    # Create initial state
+    # Create initial state (prompt may be empty, will be collected interactively)
     state = create_initial_state(
-        prompt=prompt,
         codebase_path=str(codebase_path.absolute()) if not is_git_url else path,
+        prompt=prompt or "",
         cluster_id=cluster_id,
         max_iterations=settings.max_iterations,
     )
@@ -128,8 +134,23 @@ def generate(
                 if "__interrupt__" in event:
                     break
 
-        # Get current state
+        # Get current state with analysis results
         current_state = graph.get_state(config)
+        analysis = current_state.values.get("codebase_analysis", {})
+
+        # If no prompt was provided, collect it interactively after analysis
+        if not prompt and not no_questions:
+            prompt = _collect_deployment_prompt(analysis)
+            graph.update_state(config, {"prompt": prompt})
+
+            # Show configuration now that we have the prompt
+            console.print(Panel(
+                f"[bold]Nomad Job Spec Generator[/bold]\n\n"
+                f"Prompt: {prompt}\n"
+                f"Codebase: {path}\n"
+                f"Cluster: {cluster_id}",
+                title="Configuration",
+            ))
 
         if not no_questions and current_state.values.get("questions"):
             # Display questions and collect responses
@@ -244,6 +265,50 @@ def _collect_user_responses(state: dict) -> dict[str, str]:
         responses[f"q{i}"] = response
 
     return responses
+
+
+def _collect_deployment_prompt(analysis: dict) -> str:
+    """Display analysis summary and collect deployment prompt from user.
+
+    Args:
+        analysis: The codebase analysis results.
+
+    Returns:
+        User's deployment prompt.
+    """
+    console.print("\n[bold]Codebase Analysis Complete[/bold]\n")
+
+    # Build summary table
+    table = Table(title="Analysis Summary")
+    table.add_column("Property", style="cyan")
+    table.add_column("Value", style="green")
+
+    dockerfile = analysis.get("dockerfile", {})
+    if dockerfile:
+        table.add_row("Base Image", dockerfile.get("base_image") or "Not found")
+        ports = dockerfile.get("exposed_ports", [])
+        if ports:
+            table.add_row("Exposed Ports", ", ".join(map(str, ports)))
+
+    deps = analysis.get("dependencies", {})
+    if deps:
+        table.add_row("Language", deps.get("language") or "Unknown")
+
+    env_vars = analysis.get("env_vars_required", [])[:5]
+    if env_vars:
+        table.add_row("Env Vars Detected", ", ".join(env_vars))
+
+    resources = analysis.get("suggested_resources", {})
+    table.add_row("Suggested CPU", f"{resources.get('cpu', 500)} MHz")
+    table.add_row("Suggested Memory", f"{resources.get('memory', 256)} MB")
+
+    console.print(table)
+    console.print()
+
+    return Prompt.ask(
+        "[bold cyan]What would you like to deploy?[/bold cyan]",
+        default="Deploy this application"
+    )
 
 
 def _display_analysis_table(analysis):

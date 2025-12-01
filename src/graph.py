@@ -55,16 +55,16 @@ class AgentState(dict):
 
 
 def create_initial_state(
-    prompt: str,
     codebase_path: str,
+    prompt: str = "",
     cluster_id: str = "default",
     max_iterations: int = 3,
 ) -> dict[str, Any]:
     """Create the initial state for the agent.
 
     Args:
-        prompt: User's deployment request.
         codebase_path: Path to the codebase to analyze.
+        prompt: User's deployment request. If not provided, can be set later interactively.
         cluster_id: Identifier for the Nomad cluster (for memory).
         max_iterations: Maximum fix iterations allowed.
 
@@ -304,9 +304,9 @@ def compile_graph(
 
 
 def run_graph(
-    prompt: str,
     codebase_path: str,
     llm: BaseChatModel,
+    prompt: str = "",
     settings: Settings | None = None,
     user_responses: dict[str, str] | None = None,
     cluster_id: str = "default",
@@ -317,9 +317,9 @@ def run_graph(
     This is useful for testing or when responses are pre-provided.
 
     Args:
-        prompt: User's deployment request.
         codebase_path: Path to the codebase.
         llm: LLM instance.
+        prompt: User's deployment request. Defaults to empty string.
         settings: Application settings.
         user_responses: Pre-provided user responses.
         cluster_id: Cluster identifier for memory.
@@ -333,8 +333,8 @@ def run_graph(
 
     # Create initial state
     state = create_initial_state(
-        prompt=prompt,
         codebase_path=codebase_path,
+        prompt=prompt,
         cluster_id=cluster_id,
         max_iterations=settings.max_iterations,
     )
