@@ -223,7 +223,7 @@ def validate(
     settings = get_settings()
 
     with console.status("[bold green]Validating..."):
-        is_valid, error = validate_hcl(hcl_content, settings.nomad_address)
+        is_valid, error = validate_hcl(hcl_content, settings.nomad_addr)
 
     if is_valid:
         console.print("[green]Valid[/green] Job specification is valid")

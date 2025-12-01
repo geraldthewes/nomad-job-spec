@@ -170,7 +170,7 @@ docker-run:
 	docker run --rm -it \
 		-v $(PWD):/app \
 		-e VLLM_BASE_URL \
-		-e NOMAD_ADDRESS \
+		-e NOMAD_ADDR \
 		$(PACKAGE_NAME):latest $(CMD)
 
 # ================================

@@ -571,12 +571,12 @@ def generate_simple_hcl(
     return generate_hcl(config)
 
 
-def validate_hcl(hcl_content: str, nomad_address: str | None = None) -> tuple[bool, str | None]:
+def validate_hcl(hcl_content: str, nomad_addr: str | None = None) -> tuple[bool, str | None]:
     """Validate HCL content using Nomad CLI.
 
     Args:
         hcl_content: The HCL job specification content.
-        nomad_address: Optional Nomad server address for validation.
+        nomad_addr: Optional Nomad server address for validation.
 
     Returns:
         Tuple of (is_valid, error_message).
@@ -589,8 +589,8 @@ def validate_hcl(hcl_content: str, nomad_address: str | None = None) -> tuple[bo
     try:
         # Build command
         cmd = ["nomad", "job", "validate"]
-        if nomad_address:
-            cmd.extend(["-address", nomad_address])
+        if nomad_addr:
+            cmd.extend(["-address", nomad_addr])
         cmd.append(temp_path)
 
         # Run validation

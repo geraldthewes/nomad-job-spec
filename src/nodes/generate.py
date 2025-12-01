@@ -143,7 +143,7 @@ def generate_spec_node(
     hcl_content = generate_hcl(config)
 
     # Validate HCL
-    is_valid, validation_error = validate_hcl(hcl_content, settings.nomad_address)
+    is_valid, validation_error = validate_hcl(hcl_content, settings.nomad_addr)
 
     return {
         **state,
@@ -427,7 +427,7 @@ Output ONLY a valid JSON object with the fixed job configuration.
         config = _increment_resources(current_config, error, settings)
 
     hcl_content = generate_hcl(config)
-    is_valid, validation_error = validate_hcl(hcl_content, settings.nomad_address)
+    is_valid, validation_error = validate_hcl(hcl_content, settings.nomad_addr)
 
     return {
         **state,

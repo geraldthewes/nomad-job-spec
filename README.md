@@ -52,11 +52,13 @@ Key configuration options:
 |----------|-------------|---------|
 | `VLLM_BASE_URL` | vLLM server endpoint | `http://localhost:8000` |
 | `VLLM_MODEL` | Model name | `Qwen/Qwen3-32B` |
-| `NOMAD_ADDRESS` | Nomad cluster address | `http://localhost:4646` |
+| `NOMAD_ADDR` | Nomad cluster address | `http://localhost:4646` |
 | `NOMAD_DATACENTER` | Default datacenter | `dc1` |
 | `QDRANT_HOST` | Qdrant server for memory | `localhost` |
 | `MEMORY_ENABLED` | Enable learning from past deployments | `true` |
-| `LANGFUSE_ENABLED` | Enable observability tracing | `true` |
+| `LANGFUSE_ENABLED` | Enable observability tracing | `false` |
+| `LANGFUSE_PUBLIC_KEY` | LangFuse public key (required when enabled) | - |
+| `LANGFUSE_SECRET_KEY` | LangFuse secret key (required when enabled) | - |
 
 ### 2. Analyze a Codebase
 
@@ -192,7 +194,7 @@ LLM_TEMPERATURE=0.1
 LLM_MAX_TOKENS=4096
 
 # Nomad Configuration
-NOMAD_ADDRESS=http://localhost:4646
+NOMAD_ADDR=http://localhost:4646
 NOMAD_NAMESPACE=default
 NOMAD_REGION=global
 NOMAD_DATACENTER=dc1
@@ -203,8 +205,11 @@ QDRANT_PORT=6333
 MEMORY_ENABLED=true
 
 # Observability (LangFuse)
-LANGFUSE_ENABLED=true
-LANGFUSE_HOST=https://cloud.langfuse.com
+# Both keys required when enabled - see https://langfuse.com/docs/sdk/python/low-level-sdk
+LANGFUSE_ENABLED=false
+# LANGFUSE_PUBLIC_KEY=pk-lf-...
+# LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
 
 # Agent Configuration
 MAX_ITERATIONS=3

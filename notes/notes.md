@@ -749,7 +749,7 @@
          vllm_model: str = "Qwen/Qwen3-32B"
 
          # Nomad
-         nomad_address: str = "http://localhost:4646"
+         nomad_addr: str = "http://localhost:4646"
          nomad_token: str | None = None
          nomad_namespace: str = "default"
 
@@ -757,10 +757,11 @@
          qdrant_host: str = "localhost"
          qdrant_port: int = 6333
 
-         # Observability
-         langfuse_public_key: str
-         langfuse_secret_key: str
-         langfuse_host: str = "https://cloud.langfuse.com"
+         # Observability (both keys required when enabled)
+         langfuse_enabled: bool = False
+         langfuse_public_key: str | None = None
+         langfuse_secret_key: str | None = None
+         langfuse_base_url: str = "https://cloud.langfuse.com"
 
          # Agent
          max_iterations: int = 3
@@ -985,4 +986,23 @@ All changes have been committed. The untracked directories are:
 
   [master (root-commit) 28ea46f] Initial commit: Nomad Job Spec Agent v0.1.0
    41 files changed, 7607 insertions(+)
+
+
+● Yes, the configuration will fetch values from both the .env file and environment variables. Here's how it works:
+
+  The project uses pydantic_settings.BaseSettings (see config/settings.py:10-18), which has the following resolution order:
+
+  1. Environment variables (highest priority)
+  2. .env file values
+  3. Default values defined in the Field() declarations
+
+  This is standard Pydantic Settings behavior. The SettingsConfigDict at lines 13-18 specifies:
+  - env_file=".env" - load from .env file if present
+  - case_sensitive=False - environment variable names are case-insensitive
+
+  So if you set NOMAD_ADDR=http://production:4646 in your shell environment, it will override any value in the .env file. This allows you to:
+
+  - Use .env for local development defaults
+  - Override with actual environment variables in production (e.g., in Docker, systemd, or Kubernetes)
+
 

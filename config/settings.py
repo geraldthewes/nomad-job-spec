@@ -3,7 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     )
 
     # Nomad Configuration
-    nomad_address: str = Field(
+    nomad_addr: str = Field(
         default="http://localhost:4646",
         description="Nomad cluster address",
     )
@@ -90,22 +90,40 @@ class Settings(BaseSettings):
     )
 
     # Observability Configuration (LangFuse)
+    # Both public and secret keys are required when langfuse_enabled=True
+    # See: https://langfuse.com/docs/sdk/python/low-level-sdk
     langfuse_enabled: bool = Field(
-        default=True,
-        description="Enable LangFuse tracing",
+        default=False,
+        description="Enable LangFuse tracing (requires public and secret keys)",
     )
     langfuse_public_key: str | None = Field(
         default=None,
-        description="LangFuse public key",
+        description="LangFuse public key (required when enabled)",
     )
     langfuse_secret_key: str | None = Field(
         default=None,
-        description="LangFuse secret key",
+        description="LangFuse secret key (required when enabled)",
     )
-    langfuse_host: str = Field(
+    langfuse_base_url: str = Field(
         default="https://cloud.langfuse.com",
-        description="LangFuse host URL",
+        description="LangFuse base URL",
     )
+
+    @model_validator(mode="after")
+    def validate_langfuse_keys(self) -> "Settings":
+        """Validate that both LangFuse keys are provided when enabled."""
+        if self.langfuse_enabled:
+            missing = []
+            if not self.langfuse_public_key:
+                missing.append("LANGFUSE_PUBLIC_KEY")
+            if not self.langfuse_secret_key:
+                missing.append("LANGFUSE_SECRET_KEY")
+            if missing:
+                raise ValueError(
+                    f"LangFuse is enabled but missing required keys: {', '.join(missing)}. "
+                    "Set these environment variables or disable LangFuse with LANGFUSE_ENABLED=false"
+                )
+        return self
 
     # Agent Configuration
     max_iterations: int = Field(

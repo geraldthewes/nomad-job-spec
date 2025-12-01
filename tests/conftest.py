@@ -105,7 +105,7 @@ def mock_settings():
         llm_provider="vllm",
         vllm_base_url="http://localhost:8000",
         vllm_model="test-model",
-        nomad_address="http://localhost:4646",
+        nomad_addr="http://localhost:4646",
         nomad_datacenter="dc1",
         nomad_namespace="default",
         nomad_region="global",
