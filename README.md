@@ -8,9 +8,10 @@ AI-powered Nomad job specification generator using LangGraph. Analyzes codebases
 - **Cluster-Aware Generation**: Generate HCL compatible with your cluster's patterns (Terraform templating, architecture constraints)
 - **Service Classification**: Automatically categorize services (LIGHT/MEDIUM/HEAVY/COMPUTE) for appropriate resource allocation
 - **CSI Volume Support**: Generate volume blocks with init tasks for proper permissions
-- **Vault Integration**: Template secrets from Vault with custom delimiters
-- **Fabio Routing**: Generate proper routing tags for the Fabio load balancer
-- **Interactive CLI**: Answer clarifying questions for customized specs
+- **Vault Integration**: Query Vault for secret paths, auto-suggest mappings, support both template blocks and Nomad 1.4+ native env stanza
+- **Consul Integration**: Load conventions from Consul KV, service discovery for dependencies
+- **Fabio Routing**: Generate routing tags with conflict detection (strict mode blocks deployment on conflicts)
+- **Interactive CLI**: Answer clarifying questions with Vault path suggestions
 - **Memory Layer**: Learn from past deployments via Mem0/Qdrant
 - **Observability**: LangFuse tracing for debugging and optimization
 
@@ -54,6 +55,11 @@ Key configuration options:
 | `VLLM_MODEL` | Model name | `Qwen/Qwen3-32B` |
 | `NOMAD_ADDR` | Nomad cluster address | `http://localhost:4646` |
 | `NOMAD_DATACENTER` | Default datacenter | `dc1` |
+| `VAULT_ADDR` | Vault server address | `http://localhost:8200` |
+| `VAULT_TOKEN` | Vault authentication token | - |
+| `CONSUL_HTTP_ADDR` | Consul HTTP API address | `http://localhost:8500` |
+| `CONSUL_CONVENTIONS_PATH` | Consul KV path for conventions | `config/nomad-agent/conventions` |
+| `FABIO_ADMIN_ADDR` | Fabio admin API for route validation | `http://localhost:9998` |
 | `QDRANT_HOST` | Qdrant server for memory | `localhost` |
 | `MEMORY_ENABLED` | Enable learning from past deployments | `true` |
 | `LANGFUSE_ENABLED` | Enable observability tracing | `false` |
@@ -144,6 +150,20 @@ task "init-data" {
 
 ### Vault Integration
 
+The agent supports two Vault secret formats, auto-selected based on your Nomad version:
+
+**Nomad 1.4+ (Native env stanza)**:
+```hcl
+vault {
+  policies = ["myapp-policy"]
+  env {
+    DB_PASSWORD = "secret/data/myapp/db#password"
+    API_KEY = "secret/data/myapp/api#key"
+  }
+}
+```
+
+**Nomad < 1.4 (Template blocks)**:
 ```hcl
 vault {
   policies = ["myapp-policy"]
@@ -160,15 +180,53 @@ EOH
 }
 ```
 
+When asked about environment variables, you can specify Vault paths like:
+```
+Use secret/data/aws/transcription for AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
+```
+
+The agent will validate the paths exist in Vault and generate the appropriate HCL.
+
+### Consul Conventions
+
+The agent loads naming conventions from Consul KV at `config/nomad-agent/conventions`:
+
+```json
+{
+  "vault": {
+    "path_patterns": {
+      "database": "secret/data/{app_name}/db",
+      "aws": "secret/data/aws/{app_name}"
+    },
+    "env_var_mappings": {
+      "DB_PASSWORD": {"path": "db", "key": "password"},
+      "AWS_ACCESS_KEY_ID": {"path": "aws", "key": "access_key"},
+      "AWS_SECRET_ACCESS_KEY": {"path": "aws", "key": "secret_key"}
+    }
+  },
+  "fabio": {
+    "default_port": 9999,
+    "hostname_suffix": ".cluster",
+    "reserved_hostnames": ["registry", "vault", "consul"]
+  }
+}
+```
+
+This allows centralized management of secret path patterns across your organization.
+
 ### Fabio Routing
+
+The agent checks for route conflicts before deployment (strict mode):
 
 ```hcl
 service {
   name = "my-app"
-  tags = ["urlprefix-myapp.example.com:9999/"]
+  tags = ["urlprefix-myapp.cluster:9999/"]
   # ...
 }
 ```
+
+If a hostname is already in use, deployment will be blocked with an error.
 
 ## Service Types
 
@@ -198,6 +256,17 @@ NOMAD_ADDR=http://localhost:4646
 NOMAD_NAMESPACE=default
 NOMAD_REGION=global
 NOMAD_DATACENTER=dc1
+
+# Vault Configuration
+VAULT_ADDR=http://localhost:8200
+# VAULT_TOKEN=hvs.xxx
+
+# Consul Configuration
+CONSUL_HTTP_ADDR=http://localhost:8500
+CONSUL_CONVENTIONS_PATH=config/nomad-agent/conventions
+
+# Fabio Configuration
+FABIO_ADMIN_ADDR=http://localhost:9998
 
 # Memory Layer (Mem0 + Qdrant)
 QDRANT_HOST=localhost
@@ -249,10 +318,16 @@ nomad-job-spec/
 │   │   └── provider.py   # LLM abstraction
 │   ├── nodes/
 │   │   ├── analyze.py    # Codebase analysis node
-│   │   └── generate.py   # HCL generation node
+│   │   ├── enrich.py     # Infrastructure enrichment node
+│   │   ├── generate.py   # HCL generation node
+│   │   └── validate.py   # Pre-deployment validation node
 │   └── tools/
 │       ├── codebase.py   # Codebase analysis tools
-│       └── hcl.py        # HCL generation/validation
+│       ├── consul.py     # Consul KV and service discovery
+│       ├── fabio.py      # Fabio route validation
+│       ├── hcl.py        # HCL generation/validation
+│       ├── nomad_version.py  # Nomad version detection
+│       └── vault.py      # Vault secret path validation
 ├── config/
 │   └── settings.py       # Pydantic settings
 ├── tests/
