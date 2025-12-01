@@ -42,7 +42,7 @@ class VLLMProvider(LLMProvider):
     def get_llm(self) -> BaseChatModel:
         """Get a ChatOpenAI instance configured for vLLM."""
         return ChatOpenAI(
-            openai_api_base=f"{self.base_url}/v1",
+            openai_api_base=self.base_url,
             openai_api_key="EMPTY",  # vLLM doesn't require a key
             model_name=self.model,
             temperature=self.temperature,

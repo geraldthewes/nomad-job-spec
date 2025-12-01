@@ -103,7 +103,7 @@ def mock_settings():
 
     return Settings(
         llm_provider="vllm",
-        vllm_base_url="http://localhost:8000",
+        vllm_base_url="http://localhost:8000/v1",
         vllm_model="test-model",
         nomad_addr="http://localhost:4646",
         nomad_datacenter="dc1",

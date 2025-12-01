@@ -50,7 +50,7 @@ Key configuration options:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `VLLM_BASE_URL` | vLLM server endpoint | `http://localhost:8000` |
+| `VLLM_BASE_URL` | vLLM server endpoint (OpenAI-compatible) | `http://localhost:8000/v1` |
 | `VLLM_MODEL` | Model name | `Qwen/Qwen3-32B` |
 | `NOMAD_ADDR` | Nomad cluster address | `http://localhost:4646` |
 | `NOMAD_DATACENTER` | Default datacenter | `dc1` |
@@ -188,7 +188,7 @@ The generator classifies services into resource categories:
 ```bash
 # LLM Configuration
 LLM_PROVIDER=vllm              # vllm, openai, or anthropic
-VLLM_BASE_URL=http://localhost:8000
+VLLM_BASE_URL=http://localhost:8000/v1
 VLLM_MODEL=Qwen/Qwen3-32B
 LLM_TEMPERATURE=0.1
 LLM_MAX_TOKENS=4096

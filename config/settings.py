@@ -23,8 +23,8 @@ class Settings(BaseSettings):
         description="LLM provider to use",
     )
     vllm_base_url: str = Field(
-        default="http://localhost:8000",
-        description="vLLM server base URL",
+        default="http://localhost:8000/v1",
+        description="vLLM server base URL (OpenAI-compatible endpoint)",
     )
     vllm_model: str = Field(
         default="Qwen/Qwen3-32B",
