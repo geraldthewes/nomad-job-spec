@@ -15,6 +15,7 @@ from rich.table import Table
 from config.settings import get_settings
 from src.llm.provider import get_llm
 from src.graph import compile_graph, create_initial_state
+from src.tools.infra_status import InfraHealthReport, check_infrastructure_from_settings
 
 app = typer.Typer(
     name="nomad-spec",
@@ -61,6 +62,11 @@ def generate(
         "--verbose", "-v",
         help="Show detailed output",
     ),
+    skip_infra_check: bool = typer.Option(
+        False,
+        "--skip-infra-check",
+        help="Skip infrastructure connectivity checks and use defaults",
+    ),
 ):
     """Generate a Nomad job specification from a codebase.
 
@@ -85,6 +91,25 @@ def generate(
     # Handle --no-questions without prompt: use default
     if no_questions and not prompt:
         prompt = "Deploy this application"
+
+    # Check infrastructure health (unless skipped)
+    if not skip_infra_check:
+        with console.status("[bold green]Checking infrastructure..."):
+            health_report = check_infrastructure_from_settings(settings)
+
+        if not health_report.all_healthy:
+            _display_infra_status(health_report)
+            failures = health_report.get_failures()
+
+            if not no_questions:
+                if not Confirm.ask(
+                    f"\n[yellow]{len(failures)} service(s) unavailable.[/yellow] Continue with available services?"
+                ):
+                    console.print("[dim]Aborted by user[/dim]")
+                    raise typer.Exit(code=1)
+                console.print()
+        elif verbose:
+            _display_infra_status(health_report)
 
     # Show initial configuration if prompt was provided
     if prompt:
@@ -394,6 +419,43 @@ def _print_event(event: dict):
         if node.startswith("__"):
             continue
         console.print(f"[dim]Node: {node}[/dim]")
+
+
+def _display_infra_status(health: InfraHealthReport):
+    """Display infrastructure health status in a rich table.
+
+    Args:
+        health: InfraHealthReport with status of all services.
+    """
+    table = Table(title="Infrastructure Status")
+    table.add_column("Service", style="cyan")
+    table.add_column("Status", justify="center")
+    table.add_column("Address")
+    table.add_column("Issue / Action")
+
+    for status in health.statuses:
+        if status.available:
+            status_str = "[green]OK[/green]"
+            action = "-"
+        else:
+            status_str = "[red]FAILED[/red]"
+            # Combine error and suggestion for clarity
+            parts = []
+            if status.error:
+                parts.append(status.error)
+            if status.suggestion:
+                parts.append(f"[dim]{status.suggestion}[/dim]")
+            action = "\n".join(parts) if parts else "Unknown error"
+
+        table.add_row(
+            status.service,
+            status_str,
+            status.address,
+            action,
+        )
+
+    console.print()
+    console.print(table)
 
 
 if __name__ == "__main__":

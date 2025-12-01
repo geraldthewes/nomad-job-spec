@@ -15,6 +15,7 @@ from src.tools.vault import VaultClient, VaultConventions, get_vault_client, set
 from src.tools.consul import ConsulClient, get_consul_client, set_consul_client
 from src.tools.fabio import FabioClient, get_fabio_client, set_fabio_client
 from src.tools.nomad_version import get_cached_nomad_version
+from src.tools.infra_status import InfraStatus
 
 logger = logging.getLogger(__name__)
 
@@ -88,24 +89,48 @@ def create_enrich_node(
         app_name = _extract_app_name(state)
 
         # Try to get clients - may fail if services unavailable
+        # We track initialization status to provide better feedback
         vault = None
         consul = None
         fabio = None
+        infra_issues: list[dict[str, str]] = []
 
         try:
             vault = get_vault_client()
         except Exception as e:
-            logger.warning(f"Could not initialize Vault client: {e}")
+            error_str = str(e)
+            if "connection refused" in error_str.lower():
+                msg = "Vault connection refused - check if Vault is running"
+            elif "timeout" in error_str.lower():
+                msg = "Vault connection timeout - check network"
+            else:
+                msg = f"Vault initialization failed: {error_str[:100]}"
+            logger.warning(msg)
+            infra_issues.append({"service": "Vault", "error": msg})
 
         try:
             consul = get_consul_client()
         except Exception as e:
-            logger.warning(f"Could not initialize Consul client: {e}")
+            error_str = str(e)
+            if "connection refused" in error_str.lower():
+                msg = "Consul connection refused - check if Consul is running"
+            elif "invalid" in error_str.lower():
+                msg = f"Consul address configuration issue: {error_str[:100]}"
+            else:
+                msg = f"Consul initialization failed: {error_str[:100]}"
+            logger.warning(msg)
+            infra_issues.append({"service": "Consul", "error": msg})
 
         try:
             fabio = get_fabio_client()
         except Exception as e:
-            logger.warning(f"Could not initialize Fabio client: {e}")
+            error_str = str(e)
+            if "connection refused" in error_str.lower():
+                msg = "Fabio connection refused - check if Fabio is running"
+            else:
+                msg = f"Fabio initialization failed: {error_str[:100]}"
+            logger.warning(msg)
+            infra_issues.append({"service": "Fabio", "error": msg})
 
         # Initialize enrichment data
         vault_suggestions: dict[str, Any] = {"suggestions": [], "error": None}
@@ -250,6 +275,7 @@ def create_enrich_node(
             "consul_services": consul_services,
             "fabio_validation": fabio_validation,
             "nomad_info": nomad_info,
+            "infra_issues": infra_issues,  # Track any infrastructure connection issues
         }
 
     return enrich_node

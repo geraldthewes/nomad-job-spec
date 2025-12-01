@@ -138,7 +138,13 @@ class ConsulClient:
                 modify_index=data.get("ModifyIndex", 0),
             )
         except consul.ConsulException as e:
-            logger.error(f"Consul error getting key {key}: {e}")
+            error_str = str(e).lower()
+            if "connection refused" in error_str:
+                logger.error(f"Consul connection refused at {self.addr}. Check if Consul is running.")
+            elif "403" in str(e) or "acl" in error_str:
+                logger.error(f"Consul access denied for key {key}. Check CONSUL_HTTP_TOKEN permissions.")
+            else:
+                logger.error(f"Consul error getting key {key} from {self.addr}: {e}")
             return None
 
     def get_kv_json(self, key: str) -> dict[str, Any] | None:
@@ -192,7 +198,13 @@ class ConsulClient:
                 )
             return entries
         except consul.ConsulException as e:
-            logger.error(f"Consul error listing prefix {prefix}: {e}")
+            error_str = str(e).lower()
+            if "connection refused" in error_str:
+                logger.error(f"Consul connection refused at {self.addr}. Check if Consul is running.")
+            elif "403" in str(e) or "acl" in error_str:
+                logger.error(f"Consul access denied for prefix {prefix}. Check CONSUL_HTTP_TOKEN permissions.")
+            else:
+                logger.error(f"Consul error listing prefix {prefix} from {self.addr}: {e}")
             return []
 
     def put_kv(self, key: str, value: str) -> bool:
@@ -208,7 +220,13 @@ class ConsulClient:
         try:
             return self._client.kv.put(key, value)
         except consul.ConsulException as e:
-            logger.error(f"Consul error putting key {key}: {e}")
+            error_str = str(e).lower()
+            if "connection refused" in error_str:
+                logger.error(f"Consul connection refused at {self.addr}. Check if Consul is running.")
+            elif "403" in str(e) or "acl" in error_str:
+                logger.error(f"Consul access denied for writing key {key}. Check CONSUL_HTTP_TOKEN permissions.")
+            else:
+                logger.error(f"Consul error putting key {key} to {self.addr}: {e}")
             return False
 
     def put_kv_json(self, key: str, data: dict[str, Any]) -> bool:
@@ -279,7 +297,13 @@ class ConsulClient:
             index, services = self._client.catalog.services()
             return services
         except consul.ConsulException as e:
-            logger.error(f"Consul error listing services: {e}")
+            error_str = str(e).lower()
+            if "connection refused" in error_str:
+                logger.error(f"Consul connection refused at {self.addr}. Check if Consul is running.")
+            elif "403" in str(e) or "acl" in error_str:
+                logger.error(f"Consul access denied for listing services. Check CONSUL_HTTP_TOKEN permissions.")
+            else:
+                logger.error(f"Consul error listing services from {self.addr}: {e}")
             return {}
 
     def get_service(self, name: str) -> list[ConsulService]:
@@ -305,7 +329,13 @@ class ConsulClient:
                 for node in nodes
             ]
         except consul.ConsulException as e:
-            logger.error(f"Consul error getting service {name}: {e}")
+            error_str = str(e).lower()
+            if "connection refused" in error_str:
+                logger.error(f"Consul connection refused at {self.addr}. Check if Consul is running.")
+            elif "403" in str(e) or "acl" in error_str:
+                logger.error(f"Consul access denied for service {name}. Check CONSUL_HTTP_TOKEN permissions.")
+            else:
+                logger.error(f"Consul error getting service {name} from {self.addr}: {e}")
             return []
 
     def get_service_health(self, name: str) -> list[ConsulService]:
@@ -349,7 +379,13 @@ class ConsulClient:
 
             return services
         except consul.ConsulException as e:
-            logger.error(f"Consul error getting health for {name}: {e}")
+            error_str = str(e).lower()
+            if "connection refused" in error_str:
+                logger.error(f"Consul connection refused at {self.addr}. Check if Consul is running.")
+            elif "403" in str(e) or "acl" in error_str:
+                logger.error(f"Consul access denied for health check on {name}. Check CONSUL_HTTP_TOKEN permissions.")
+            else:
+                logger.error(f"Consul error getting health for {name} from {self.addr}: {e}")
             return []
 
     def service_exists(self, name: str) -> bool:

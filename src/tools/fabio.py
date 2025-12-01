@@ -96,8 +96,46 @@ class FabioClient:
                 self._routes_cache = routes
                 return routes
 
+        except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code
+            if status_code == 404:
+                logger.error(
+                    f"Fabio routes API not found at {self.addr}. "
+                    f"Check Fabio version and admin endpoint configuration."
+                )
+            elif status_code == 503:
+                logger.error(
+                    f"Fabio service unavailable at {self.addr}. "
+                    f"Fabio may be starting up or unhealthy."
+                )
+            else:
+                logger.error(f"Fabio HTTP error {status_code} at {self.addr}: {e}")
+            return []
+
+        except httpx.ConnectError as e:
+            logger.error(
+                f"Fabio connection refused at {self.addr}. "
+                f"Check if Fabio is running and FABIO_ADMIN_ADDR is correct."
+            )
+            return []
+
+        except httpx.TimeoutException as e:
+            logger.error(
+                f"Fabio connection timeout at {self.addr}. "
+                f"Check network connectivity to Fabio admin endpoint."
+            )
+            return []
+
         except httpx.HTTPError as e:
-            logger.error(f"Failed to fetch Fabio routes: {e}")
+            error_str = str(e).lower()
+            if "name or service not known" in error_str:
+                host = self.addr.replace("http://", "").replace("https://", "").split(":")[0]
+                logger.error(
+                    f"Fabio DNS resolution failed for '{host}'. "
+                    f"Check DNS settings or use IP address in FABIO_ADMIN_ADDR."
+                )
+            else:
+                logger.error(f"Failed to fetch Fabio routes from {self.addr}: {e}")
             return []
 
     def _parse_routes_csv(self, csv_data: str) -> list[FabioRouteEntry]:

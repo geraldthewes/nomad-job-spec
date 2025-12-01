@@ -100,7 +100,10 @@ class VaultClient:
         self.namespace = namespace or os.environ.get("VAULT_NAMESPACE")
 
         if not self.token:
-            logger.warning("No Vault token provided - operations will fail")
+            logger.warning(
+                f"No Vault token provided (VAULT_TOKEN not set). "
+                f"Vault operations at {self.addr} will require authentication."
+            )
 
         self._client = hvac.Client(
             url=self.addr,
@@ -143,13 +146,28 @@ class VaultClient:
             )
             return response.get("data", {}).get("keys", [])
         except InvalidPath:
-            logger.debug(f"Path not found: {path}")
+            logger.debug(f"Vault path not found: {path}")
             return []
         except Forbidden:
-            logger.warning(f"Access denied to list: {path}")
+            logger.warning(
+                f"Vault access denied to list: {path}. "
+                f"Check VAULT_TOKEN has 'list' capability on this path."
+            )
             return []
         except VaultError as e:
-            logger.error(f"Vault error listing secrets: {e}")
+            error_str = str(e).lower()
+            if "connection refused" in error_str:
+                logger.error(
+                    f"Vault connection refused at {self.addr}. "
+                    f"Check if Vault is running."
+                )
+            elif "timeout" in error_str:
+                logger.error(
+                    f"Vault connection timeout at {self.addr}. "
+                    f"Check network connectivity."
+                )
+            else:
+                logger.error(f"Vault error listing secrets at {self.addr}: {e}")
             return []
 
     def read_metadata(self, path: str) -> VaultSecretMetadata | None:
@@ -188,13 +206,28 @@ class VaultClient:
                 updated_time=data.get("updated_time"),
             )
         except InvalidPath:
-            logger.debug(f"Secret not found: {path}")
+            logger.debug(f"Vault secret not found: {path}")
             return None
         except Forbidden:
-            logger.warning(f"Access denied to read: {path}")
+            logger.warning(
+                f"Vault access denied to read: {path}. "
+                f"Check VAULT_TOKEN has 'read' capability on this path."
+            )
             return None
         except VaultError as e:
-            logger.error(f"Vault error reading metadata: {e}")
+            error_str = str(e).lower()
+            if "connection refused" in error_str:
+                logger.error(
+                    f"Vault connection refused at {self.addr}. "
+                    f"Check if Vault is running."
+                )
+            elif "timeout" in error_str:
+                logger.error(
+                    f"Vault connection timeout at {self.addr}. "
+                    f"Check network connectivity."
+                )
+            else:
+                logger.error(f"Vault error reading metadata at {self.addr}: {e}")
             return None
 
     def validate_path(self, path: str) -> tuple[bool, str | None]:
