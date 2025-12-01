@@ -61,6 +61,7 @@ class VaultConfig:
     policies: list[str]
     secrets: dict[str, str] = field(default_factory=dict)  # env_var -> vault_path
     use_custom_delimiters: bool = False  # Use [[ ]] instead of {{ }}
+    use_native_env: bool = False  # Use Nomad 1.4+ native vault env stanza
 
 
 @dataclass
@@ -384,9 +385,12 @@ def _build_task_block(config: JobConfig) -> str:
         memory = {config.memory}
       }}''')
 
-    # Vault templates
+    # Vault secrets - use native env stanza if enabled, otherwise templates
     if config.vault and config.vault.secrets:
-        parts.append(_build_vault_templates(config.vault))
+        if config.vault.use_native_env:
+            parts.append(_build_vault_env_stanza(config.vault))
+        else:
+            parts.append(_build_vault_templates(config.vault))
 
     # Environment variables
     if config.env_vars:
@@ -433,14 +437,8 @@ def _build_vault_templates(vault: VaultConfig) -> str:
     right_delim = "]]" if vault.use_custom_delimiters else "}}"
 
     for env_var, secret_path in vault.secrets.items():
-        # Parse path like "secret/myapp/db.password" -> path and key
-        if "." in secret_path.split("/")[-1]:
-            path_parts = secret_path.rsplit(".", 1)
-            vault_path = path_parts[0]
-            key = path_parts[1]
-        else:
-            vault_path = secret_path
-            key = "value"
+        # Parse path like "secret/myapp/db.password" or "secret/myapp/db#password"
+        vault_path, key = _parse_vault_path(secret_path)
 
         template = f'''
       template {{
@@ -462,6 +460,57 @@ EOH
         parts.append(template)
 
     return "\n".join(parts)
+
+
+def _build_vault_env_stanza(vault: VaultConfig) -> str:
+    """Build Nomad 1.4+ native vault env stanza.
+
+    This generates the newer format:
+    vault {
+      env {
+        DB_PASSWORD = "secret/data/myapp/db#password"
+      }
+    }
+    """
+    env_lines = []
+    for env_var, secret_path in vault.secrets.items():
+        # Normalize path to use # separator for Nomad native format
+        vault_path, key = _parse_vault_path(secret_path)
+        # Ensure path has /data/ for KV v2
+        if not vault_path.startswith("secret/data/"):
+            vault_path = vault_path.replace("secret/", "secret/data/")
+        env_lines.append(f'        {env_var} = "{vault_path}#{key}"')
+
+    return f'''
+      vault {{
+        env {{
+{chr(10).join(env_lines)}
+        }}
+      }}'''
+
+
+def _parse_vault_path(secret_path: str) -> tuple[str, str]:
+    """Parse a Vault secret path into path and key components.
+
+    Supports formats:
+    - "secret/data/myapp/db#password" -> ("secret/data/myapp/db", "password")
+    - "secret/myapp/db.password" -> ("secret/myapp/db", "password")
+    - "secret/myapp/db" -> ("secret/myapp/db", "value")
+
+    Returns:
+        Tuple of (vault_path, key).
+    """
+    # Check for # separator (Nomad native format)
+    if "#" in secret_path:
+        return secret_path.rsplit("#", 1)
+
+    # Check for . separator in last path component
+    if "." in secret_path.split("/")[-1]:
+        path_parts = secret_path.rsplit(".", 1)
+        return path_parts[0], path_parts[1]
+
+    # No key specified, default to "value"
+    return secret_path, "value"
 
 
 def _build_env_block(config: JobConfig) -> str:

@@ -71,6 +71,36 @@ class Settings(BaseSettings):
         description="Default datacenter for jobs",
     )
 
+    # Vault Configuration
+    vault_addr: str = Field(
+        default="http://localhost:8200",
+        description="Vault server address",
+    )
+    vault_namespace: str | None = Field(
+        default=None,
+        description="Vault namespace (Enterprise only)",
+    )
+
+    # Consul Configuration
+    consul_http_addr: str = Field(
+        default="http://localhost:8500",
+        description="Consul HTTP API address",
+    )
+    consul_http_token: str | None = Field(
+        default=None,
+        description="Consul ACL token",
+    )
+    consul_conventions_path: str = Field(
+        default="config/nomad-agent/conventions",
+        description="Consul KV path for agent conventions",
+    )
+
+    # Fabio Configuration
+    fabio_admin_addr: str = Field(
+        default="http://localhost:9998",
+        description="Fabio admin API address for route validation",
+    )
+
     # Memory Layer Configuration (Mem0 + Qdrant)
     qdrant_host: str = Field(
         default="localhost",

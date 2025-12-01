@@ -11,6 +11,8 @@ from langchain_core.messages import BaseMessage
 
 from src.nodes.analyze import create_analyze_node
 from src.nodes.generate import create_generate_node, create_fix_node
+from src.nodes.enrich import create_enrich_node
+from src.nodes.validate import create_validate_node, should_proceed_after_validation
 from config.settings import Settings, get_settings
 
 
@@ -53,6 +55,16 @@ class AgentState(dict):
     relevant_memories: list[str]
     cluster_id: str
 
+    # Infrastructure enrichment (from enrich node)
+    vault_suggestions: dict[str, Any]
+    consul_conventions: dict[str, Any]
+    consul_services: dict[str, Any]
+    fabio_validation: dict[str, Any]
+    nomad_info: dict[str, Any]
+
+    # Pre-deployment validation
+    pre_deploy_validation: dict[str, Any]
+
 
 def create_initial_state(
     codebase_path: str,
@@ -90,6 +102,14 @@ def create_initial_state(
         "max_iterations": max_iterations,
         "relevant_memories": [],
         "cluster_id": cluster_id,
+        # Infrastructure enrichment
+        "vault_suggestions": {},
+        "consul_conventions": {},
+        "consul_services": {},
+        "fabio_validation": {},
+        "nomad_info": {},
+        # Validation
+        "pre_deploy_validation": {},
     }
 
 
@@ -97,8 +117,11 @@ def generate_questions_node(state: dict[str, Any]) -> dict[str, Any]:
     """Generate clarifying questions based on analysis.
 
     This node creates questions to ask the user before generating the spec.
+    Now enhanced with Vault path suggestions from enrichment.
     """
     analysis = state.get("codebase_analysis", {})
+    vault_suggestions = state.get("vault_suggestions", {})
+    fabio_validation = state.get("fabio_validation", {})
     questions = []
 
     # Check if image is missing
@@ -106,17 +129,53 @@ def generate_questions_node(state: dict[str, Any]) -> dict[str, Any]:
     if not dockerfile or not dockerfile.get("base_image"):
         questions.append("What Docker image should be used for this deployment?")
 
-    # Check for environment variables
+    # Enhanced environment variable question with Vault suggestions
     env_vars = analysis.get("env_vars_required", [])
     if env_vars:
-        questions.append(
-            f"The following environment variables were detected: {', '.join(env_vars[:5])}. "
-            "What values should be set for these?"
-        )
+        suggestions = vault_suggestions.get("suggestions", [])
+        if suggestions:
+            # Build a helpful question with Vault path suggestions
+            suggestion_lines = []
+            for s in suggestions[:5]:
+                conf = f" ({int(s['confidence']*100)}% confidence)" if s['confidence'] < 0.9 else ""
+                suggestion_lines.append(
+                    f"  - {s['env_var']}: {s['suggested_path']}#{s['key']}{conf}"
+                )
+
+            questions.append(
+                f"The following environment variables were detected with Vault path suggestions:\n"
+                + "\n".join(suggestion_lines) +
+                "\n\nConfirm these paths or provide alternatives. "
+                "Enter 'confirm' to use suggestions, or specify custom paths."
+            )
+        else:
+            questions.append(
+                f"The following environment variables were detected: {', '.join(env_vars[:5])}. "
+                "What Vault paths should be used for these secrets?"
+            )
 
     # Check for ports
     if not (dockerfile and dockerfile.get("exposed_ports")):
         questions.append("What port does this application listen on?")
+
+    # Fabio routing question with suggestion
+    suggested_hostname = fabio_validation.get("suggested_hostname")
+    conflicts = fabio_validation.get("conflicts", [])
+    if suggested_hostname:
+        if conflicts:
+            conflict_info = "; ".join(
+                f"{c['type']} with {c.get('existing_service', 'unknown')}"
+                for c in conflicts
+            )
+            questions.append(
+                f"Suggested hostname '{suggested_hostname}' has conflicts: {conflict_info}. "
+                "Please provide an alternative hostname."
+            )
+        else:
+            questions.append(
+                f"Suggested Fabio hostname: {suggested_hostname} (tag: urlprefix-{suggested_hostname}:9999/). "
+                "Confirm or provide alternative."
+            )
 
     # Resource questions
     resources = analysis.get("suggested_resources", {})
@@ -198,6 +257,9 @@ def create_workflow(
 ) -> StateGraph:
     """Create the LangGraph workflow for job spec generation.
 
+    Updated workflow with infrastructure enrichment and validation:
+    START -> analyze -> enrich -> question -> collect -> generate -> validate -> deploy -> verify
+
     Args:
         llm: LLM instance for analysis and generation.
         settings: Application settings.
@@ -211,7 +273,9 @@ def create_workflow(
 
     # Create node functions
     analyze_node = create_analyze_node(llm)
+    enrich_node = create_enrich_node(settings)
     generate_node = create_generate_node(llm)
+    validate_node = create_validate_node(settings)
     fix_node = create_fix_node(llm)
 
     # Build graph
@@ -219,15 +283,19 @@ def create_workflow(
 
     # Add nodes
     workflow.add_node("analyze", analyze_node)
+    workflow.add_node("enrich", enrich_node)  # NEW: Infrastructure enrichment
     workflow.add_node("question", generate_questions_node)
     workflow.add_node("collect", collect_responses_node)
     workflow.add_node("generate", generate_node)
+    workflow.add_node("validate", validate_node)  # NEW: Pre-deploy validation
 
-    # Basic flow (Phase 1)
+    # Updated flow: analyze -> enrich -> question -> collect -> generate -> validate
     workflow.add_edge(START, "analyze")
-    workflow.add_edge("analyze", "question")
+    workflow.add_edge("analyze", "enrich")  # NEW
+    workflow.add_edge("enrich", "question")  # MODIFIED
     workflow.add_edge("question", "collect")
     workflow.add_edge("collect", "generate")
+    workflow.add_edge("generate", "validate")  # NEW
 
     if include_deployment:
         # Add deployment nodes (Phase 2 - stubs for now)
@@ -235,7 +303,16 @@ def create_workflow(
         workflow.add_node("verify", _verify_stub)
         workflow.add_node("fix", fix_node)
 
-        workflow.add_edge("generate", "deploy")
+        # Conditional routing after validation (STRICT mode)
+        workflow.add_conditional_edges(
+            "validate",
+            should_proceed_after_validation,
+            {
+                "proceed": "deploy",
+                "blocked": END,  # Validation failed, stop here
+            },
+        )
+
         workflow.add_edge("deploy", "verify")
 
         # Conditional routing after verification
@@ -250,8 +327,8 @@ def create_workflow(
         )
         workflow.add_edge("fix", "generate")
     else:
-        # Without deployment, end after generation
-        workflow.add_edge("generate", END)
+        # Without deployment, end after validation
+        workflow.add_edge("validate", END)
 
     return workflow
 

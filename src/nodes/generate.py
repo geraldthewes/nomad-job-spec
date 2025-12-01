@@ -85,10 +85,13 @@ Notes on volume format (if needed):
 Notes on vault_secrets format (if needed):
 {
     "vault_secrets": {
-        "DB_PASSWORD": "secret/myapp/db.password",
-        "API_KEY": "secret/myapp/api.key"
+        "DB_PASSWORD": "secret/data/myapp/db#password",
+        "API_KEY": "secret/data/myapp/api#key"
     }
 }
+
+Use the "#" separator for vault secrets (e.g., "secret/data/app/db#password").
+If Vault path suggestions are provided, use them as-is.
 
 Important:
 - Job names must be lowercase, alphanumeric with hyphens only
@@ -118,8 +121,21 @@ def generate_spec_node(
     prompt = state.get("prompt", "")
     memories = state.get("relevant_memories", [])
 
-    # Build context for LLM
-    context = _build_generation_context(analysis, user_responses, prompt, memories)
+    # Get enrichment data from enrich node
+    vault_suggestions = state.get("vault_suggestions", {})
+    fabio_validation = state.get("fabio_validation", {})
+    nomad_info = state.get("nomad_info", {})
+
+    # Build context for LLM with enrichment data
+    context = _build_generation_context(
+        analysis,
+        user_responses,
+        prompt,
+        memories,
+        vault_suggestions=vault_suggestions,
+        fabio_validation=fabio_validation,
+        nomad_info=nomad_info,
+    )
 
     # Query LLM for configuration
     messages = [
@@ -133,7 +149,8 @@ def generate_spec_node(
     # Parse LLM response into JobConfig
     try:
         config_dict = _parse_llm_response(response_text)
-        config = _build_job_config(config_dict, analysis, settings)
+        # Pass nomad_info to enable native vault format when supported
+        config = _build_job_config(config_dict, analysis, settings, nomad_info)
     except Exception as e:
         # Fallback to basic config from analysis
         config = _build_fallback_config(analysis, prompt, settings)
@@ -160,6 +177,9 @@ def _build_generation_context(
     user_responses: dict[str, str],
     prompt: str,
     memories: list[str],
+    vault_suggestions: dict[str, Any] | None = None,
+    fabio_validation: dict[str, Any] | None = None,
+    nomad_info: dict[str, Any] | None = None,
 ) -> str:
     """Build context string for LLM generation."""
     parts = [
@@ -175,6 +195,37 @@ def _build_generation_context(
             "",
             "## User Responses to Questions",
             f"```json\n{json.dumps(user_responses, indent=2)}\n```",
+        ])
+
+    # Add Vault suggestions if available
+    if vault_suggestions and vault_suggestions.get("suggestions"):
+        parts.extend([
+            "",
+            "## Vault Secret Path Suggestions",
+            "Use these validated Vault paths for secrets:",
+        ])
+        for s in vault_suggestions["suggestions"]:
+            parts.append(f"- {s['env_var']}: {s['vault_reference']}")
+
+    # Add Fabio routing info if available
+    if fabio_validation:
+        hostname = fabio_validation.get("suggested_hostname")
+        if hostname:
+            parts.extend([
+                "",
+                "## Fabio Routing",
+                f"Suggested hostname: {hostname}",
+                f"Fabio tag: {fabio_validation.get('fabio_tag', f'urlprefix-{hostname}:9999/')}",
+            ])
+
+    # Add Nomad version info
+    if nomad_info:
+        vault_format = nomad_info.get("recommended_vault_format", "template")
+        parts.extend([
+            "",
+            f"## Nomad Environment",
+            f"Nomad version: {nomad_info.get('version', 'unknown')}",
+            f"Vault format: {vault_format} ({'use native vault env stanza' if vault_format == 'env_stanza' else 'use template blocks'})",
         ])
 
     if memories:
@@ -213,6 +264,7 @@ def _build_job_config(
     config_dict: dict[str, Any],
     analysis: dict[str, Any],
     settings,
+    nomad_info: dict[str, Any] | None = None,
 ) -> JobConfig:
     """Build JobConfig from LLM response and analysis."""
     # Get job name
@@ -298,9 +350,15 @@ def _build_job_config(
     # Build Vault config if specified
     vault = None
     if config_dict.get("vault_policies") or config_dict.get("vault_secrets"):
+        # Check if Nomad supports native vault env stanza
+        use_native_env = False
+        if nomad_info:
+            use_native_env = nomad_info.get("supports_native_vault_env", False)
+
         vault = VaultConfig(
             policies=config_dict.get("vault_policies", []),
             secrets=config_dict.get("vault_secrets", {}),
+            use_native_env=use_native_env,
         )
 
     # Build config
