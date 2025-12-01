@@ -1006,3 +1006,605 @@ All changes have been committed. The untracked directories are:
   - Override with actual environment variables in production (e.g., in Docker, systemd, or Kubernetes)
 
 
+Here is Claude's plan:
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Plan: Interactive Chat Flow for Nomad Job Spec Generator
+
+ Goal
+
+ Change the CLI to ask for the deployment prompt interactively after analyzing the codebase, rather than requiring it as a CLI argument.
+
+ Desired user experience:
+ $ nomad-spec generate --path . -o job.nomad
+ # CLI analyzes codebase
+ # Shows analysis summary
+ # Asks: "What would you like to deploy?"
+ # Asks follow-up questions about env vars, ports, resources, etc.
+
+ Files to Modify
+
+ | File         | Changes                                                              |
+ |--------------|----------------------------------------------------------------------|
+ | src/main.py  | Make -p optional, add _collect_deployment_prompt(), restructure flow |
+ | src/graph.py | Make prompt optional in create_initial_state() and run_graph()       |
+
+ Implementation
+
+ 1. src/main.py - CLI Changes
+
+ 1.1 Make --prompt/-p optional (line 29-33)
+
+ # Change from:
+ prompt: str = typer.Option(
+     ...,  # Required
+     "--prompt", "-p",
+     help="Deployment request (e.g., 'Deploy a Node.js API')",
+ )
+
+ # Change to:
+ prompt: Optional[str] = typer.Option(
+     None,  # Optional
+     "--prompt", "-p",
+     help="Deployment request. If not provided, will be asked interactively after analysis.",
+ )
+
+ 1.2 Add _collect_deployment_prompt() function (after _collect_user_responses)
+
+ def _collect_deployment_prompt(analysis: dict) -> str:
+     """Display analysis summary and collect deployment prompt from user."""
+     console.print("\n[bold]Codebase Analysis Complete[/bold]\n")
+
+     # Build summary table
+     table = Table(title="Analysis Summary")
+     table.add_column("Property", style="cyan")
+     table.add_column("Value", style="green")
+
+     dockerfile = analysis.get("dockerfile", {})
+     if dockerfile:
+         table.add_row("Base Image", dockerfile.get("base_image") or "Not found")
+         ports = dockerfile.get("exposed_ports", [])
+         if ports:
+             table.add_row("Exposed Ports", ", ".join(map(str, ports)))
+
+     deps = analysis.get("dependencies", {})
+     if deps:
+         table.add_row("Language", deps.get("language") or "Unknown")
+
+     env_vars = analysis.get("env_vars_required", [])[:5]
+     if env_vars:
+         table.add_row("Env Vars Detected", ", ".join(env_vars))
+
+     resources = analysis.get("suggested_resources", {})
+     table.add_row("Suggested CPU", f"{resources.get('cpu', 500)} MHz")
+     table.add_row("Suggested Memory", f"{resources.get('memory', 256)} MB")
+
+     console.print(table)
+     console.print()
+
+     return Prompt.ask(
+         "[bold cyan]What would you like to deploy?[/bold cyan]",
+         default="Deploy this application"
+     )
+
+ 1.3 Restructure generate() function flow (lines 85-145)
+
+ The key changes:
+ 1. Move the configuration panel to after we have the prompt
+ 2. If no prompt provided, collect it interactively after analysis completes
+ 3. Update state with the prompt before continuing
+
+ # After validating path and initializing LLM (around line 108):
+
+ # Create initial state (prompt may be empty)
+ state = create_initial_state(
+     prompt=prompt or "",  # Empty if not provided
+     codebase_path=str(codebase_path.absolute()) if not is_git_url else path,
+     cluster_id=cluster_id,
+     max_iterations=settings.max_iterations,
+ )
+
+ # Run graph with HitL for questions
+ config = {"configurable": {"thread_id": f"session-{cluster_id}"}}
+
+ try:
+     # First run - analyze and generate questions
+     with console.status("[bold green]Analyzing codebase..."):
+         for event in graph.stream(state, config):
+             if verbose:
+                 _print_event(event)
+             if "__interrupt__" in event:
+                 break
+
+     # Get current state with analysis
+     current_state = graph.get_state(config)
+     analysis = current_state.values.get("codebase_analysis", {})
+
+     # If no prompt provided, collect it interactively
+     if not prompt and not no_questions:
+         prompt = _collect_deployment_prompt(analysis)
+         graph.update_state(config, {"prompt": prompt})
+
+     # Now display configuration panel (prompt is known)
+     console.print(Panel(
+         f"[bold]Nomad Job Spec Generator[/bold]\n\n"
+         f"Prompt: {prompt or 'Deploy this application'}\n"
+         f"Codebase: {path}\n"
+         f"Cluster: {cluster_id}",
+         title="Configuration",
+     ))
+
+     # Continue with existing question collection flow...
+
+ 2. src/graph.py - State Changes
+
+ 2.1 Update create_initial_state() signature (line 57-62)
+
+ def create_initial_state(
+     codebase_path: str,
+     prompt: str = "",  # Now optional, moved after required param
+     cluster_id: str = "default",
+     max_iterations: int = 3,
+ ) -> dict[str, Any]:
+
+ 2.2 Update run_graph() signature (line 306-314)
+
+ def run_graph(
+     codebase_path: str,
+     prompt: str = "",  # Now optional
+     llm: BaseChatModel,
+     # ... rest unchanged
+ )
+
+ Note: Also update the call to create_initial_state() inside run_graph() at line 335.
+
+ 3. Handle --no-questions Edge Case
+
+ When --no-questions is used without -p, use a default prompt:
+
+ # In generate(), after checking no_questions:
+ if no_questions and not prompt:
+     prompt = "Deploy this application"
+
+ Implementation Order
+
+ 1. src/graph.py: Make prompt optional in create_initial_state() and run_graph()
+ 2. src/main.py: Add _collect_deployment_prompt() function
+ 3. src/main.py: Make --prompt/-p optional in CLI
+ 4. src/main.py: Restructure generate() flow to handle interactive prompt
+ 5. Test manually with: nomad-spec generate --path .
+
+ Testing Scenarios
+
+ 1. Interactive mode: nomad-spec generate --path . → Should analyze, show summary, ask for prompt
+ 2. CLI prompt: nomad-spec generate -p "Deploy API" --path . → Should work as before
+ 3. No questions: nomad-spec generate --path . --no-questions → Should use default prompt
+ 4. With output: nomad-spec generate --path . -o job.nomad → Should work with interactive prompt
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+
+ Would you like to proceed?
+
+ Summary
+
+  I've implemented the changes to make the CLI ask for the deployment prompt interactively after analyzing the codebase:
+
+  Changes made:
+
+  1. src/graph.py:
+    - Made prompt optional in create_initial_state() (default: "")
+    - Made prompt optional in run_graph() (default: "")
+    - Reordered parameters so codebase_path (required) comes first
+  2. src/main.py:
+    - Changed --prompt/-p from required to optional
+    - Added _collect_deployment_prompt() function that displays an analysis summary table and asks "What would you like to deploy?"
+    - Restructured generate() flow:
+        - If prompt provided on CLI: shows config panel immediately, runs as before
+      - If no prompt: analyzes codebase first, shows analysis summary, asks for prompt interactively, then shows config panel and continues with follow-up
+  questions
+    - Added handling for --no-questions without prompt (uses default "Deploy this application")
+
+  New user experience:
+  $ nomad-spec generate --path .
+  [Analyzing codebase...]
+
+  Codebase Analysis Complete
+
+  ┌─ Analysis Summary ─────────────────────────────┐
+  │ Property         │ Value                       │
+  ├──────────────────┼─────────────────────────────┤
+  │ Base Image       │ python:3.11-slim            │
+  │ Exposed Ports    │ 8080                        │
+  │ Language         │ python                      │
+  │ Env Vars Detected│ AWS_KEY, DATABASE_URL       │
+  │ Suggested CPU    │ 500 MHz                     │
+  │ Suggested Memory │ 256 MB                      │
+  └──────────────────┴─────────────────────────────┘
+
+  What would you like to deploy? [Deploy this application]: _
+
+  ╭─── Configuration ───╮
+  │ Prompt: ...         │
+  │ Codebase: .         │
+  │ Cluster: default    │
+  ╰─────────────────────╯
+
+  Please answer the following questions:
+  1. Environment variables...
+
+Plan: Vault, Consul, and Fabio Tool Integration
+
+ Summary
+
+ Add full Vault, Consul, and Fabio integration to the Nomad Job Spec Agent, enabling:
+ - Automatic Vault secret path suggestions and validation
+ - Consul KV-based conventions storage and service discovery
+ - Fabio route conflict detection (strict mode - blocks deployment)
+ - Support for both Nomad template blocks and 1.4+ native env stanza
+
+ User Requirements
+
+ - Conventions: Stored in Consul KV at config/nomad-agent/conventions
+ - Vault Auth: Token-based only (VAULT_TOKEN env var)
+ - Fabio Conflicts: Strict mode - block deployment on conflicts
+ - Secret Format: Support both template blocks and Nomad 1.4+ native vault env stanza
+
+ ---
+ New Files to Create
+
+ 1. src/tools/vault.py - Vault API Client
+
+ @dataclass
+ class VaultSecretMetadata:
+     path: str
+     keys: list[str]
+     version: int | None
+
+ @dataclass
+ class VaultPathSuggestion:
+     env_var: str
+     suggested_path: str
+     key: str
+     confidence: float
+
+ class VaultClient:
+     def __init__(self, addr: str, token: str, namespace: str | None = None)
+     def list_secrets(self, path: str) -> list[str]
+     def read_metadata(self, path: str) -> VaultSecretMetadata | None
+     def validate_path(self, path: str) -> tuple[bool, str | None]
+
+ # LangChain tools
+ @tool def list_vault_secrets(path: str) -> str
+ @tool def suggest_vault_mappings(env_vars: list[str], app_name: str) -> str
+ @tool def validate_vault_paths(paths: dict[str, str]) -> str
+
+ Dependencies: hvac>=2.1.0
+
+ 2. src/tools/consul.py - Consul Client
+
+ @dataclass
+ class ConsulService:
+     name: str
+     address: str
+     port: int
+     tags: list[str]
+     health_status: str
+
+ class ConsulClient:
+     def __init__(self, addr: str, token: str | None = None)
+     def get_kv(self, key: str) -> dict | None
+     def list_kv(self, prefix: str) -> list[dict]
+     def get_conventions(self) -> dict  # From config/nomad-agent/conventions
+     def list_services() -> dict[str, list[str]]
+     def get_service_health(name: str) -> list[ConsulService]
+
+ # LangChain tools
+ @tool def query_consul_kv(key: str) -> str
+ @tool def list_consul_services() -> str
+ @tool def get_service_endpoints(service_name: str) -> str
+
+ Dependencies: python-consul>=1.1.0
+
+ 3. src/tools/fabio.py - Fabio Route Validation
+
+ @dataclass
+ class FabioRouteEntry:
+     service: str
+     src: str
+     dst: str
+     weight: float
+
+ @dataclass
+ class RouteConflict:
+     existing_route: FabioRouteEntry
+     proposed_route: str
+     conflict_type: str  # exact_match, path_overlap, hostname_collision
+
+ class FabioRouteConflictError(Exception):
+     """Raised when strict mode detects a route conflict."""
+     pass
+
+ class FabioClient:
+     def __init__(self, addr: str = "http://localhost:9998")
+     def get_routes(self) -> list[FabioRouteEntry]
+     def check_route_conflict(self, hostname: str | None, path: str | None) -> RouteConflict | None
+
+ # LangChain tools
+ @tool def list_fabio_routes() -> str
+ @tool def validate_fabio_route(hostname: str, path: str) -> str
+
+ Dependencies: httpx>=0.27.0
+
+ 4. src/tools/nomad_version.py - Version Detection
+
+ @dataclass
+ class NomadVersion:
+     major: int
+     minor: int
+     patch: int
+
+     def supports_native_vault_env(self) -> bool:
+         return (self.major, self.minor) >= (1, 4)
+
+ def get_nomad_version(addr: str, token: str | None) -> NomadVersion
+ def detect_vault_format(addr: str, token: str | None) -> str  # 'env_stanza' or 'template'
+
+ 5. src/nodes/enrich.py - Enrichment Node
+
+ New workflow node that runs after analyze and before question:
+ - Queries Vault for available secret paths matching detected env vars
+ - Loads conventions from Consul KV
+ - Checks Fabio for existing routes on proposed hostname
+ - Adds suggestions to state for use in question generation
+
+ 6. src/nodes/validate.py - Pre-Deploy Validation
+
+ New workflow node that runs after generate and before deploy:
+ - Validates Fabio routes don't conflict (raises FabioRouteConflictError in strict mode)
+ - Validates Vault paths are accessible
+ - Returns validation errors to block deployment
+
+ ---
+ Files to Modify
+
+ 1. config/settings.py
+
+ Add new settings:
+ # Vault
+ vault_addr: str = Field(default="http://localhost:8200")
+ vault_namespace: str | None = Field(default=None)
+
+ # Consul
+ consul_http_addr: str = Field(default="http://localhost:8500")
+ consul_http_token: str | None = Field(default=None)
+ consul_conventions_path: str = Field(default="config/nomad-agent/conventions")
+
+ # Fabio
+ fabio_admin_addr: str = Field(default="http://localhost:9998")
+
+ 2. src/tools/hcl.py
+
+ Enhance VaultConfig:
+ @dataclass
+ class VaultConfig:
+     policies: list[str]
+     secrets: dict[str, str]  # env_var -> vault_path
+     use_custom_delimiters: bool = False
+     use_native_env: bool = False  # NEW: Nomad 1.4+ env stanza
+
+ Add _build_vault_env_stanza() function for native format:
+ vault {
+   env {
+     DB_PASSWORD = "secret/data/myapp/db#password"
+   }
+ }
+
+ 3. src/graph.py
+
+ Update workflow:
+ START -> analyze -> enrich -> question -> collect -> generate -> validate -> deploy -> verify
+
+ Add to AgentState:
+ vault_suggestions: dict[str, Any]
+ consul_services: dict[str, Any]
+ fabio_validation: dict[str, Any]
+
+ 4. src/nodes/analyze.py
+
+ Update ANALYSIS_SYSTEM_PROMPT to identify:
+ - Env vars that likely need secrets (password, key, token, secret patterns)
+ - Output vault_suggestions with confidence scores
+
+ 5. src/nodes/generate.py
+
+ Add Nomad version detection to auto-select Vault format:
+ nomad_version = get_nomad_version(settings.nomad_addr)
+ use_native_vault = nomad_version.supports_native_vault_env()
+
+ 6. pyproject.toml
+
+ Add dependencies:
+ "hvac>=2.1.0",
+ "python-consul>=1.1.0",
+ "httpx>=0.27.0",
+
+ ---
+ Consul KV Convention Structure
+
+ Store at config/nomad-agent/conventions:
+
+ {
+   "vault": {
+     "path_patterns": {
+       "database": "secret/data/{app_name}/db",
+       "redis": "secret/data/{app_name}/redis",
+       "api_keys": "secret/data/{app_name}/app",
+       "aws": "secret/data/aws/{app_name}"
+     },
+     "env_var_mappings": {
+       "DB_PASSWORD": {"path": "db", "key": "password"},
+       "AWS_ACCESS_KEY_ID": {"path": "aws", "key": "access_key"},
+       "AWS_SECRET_ACCESS_KEY": {"path": "aws", "key": "secret_key"}
+     }
+   },
+   "fabio": {
+     "default_port": 9999,
+     "hostname_suffix": ".cluster"
+   }
+ }
+
+ ---
+ Updated Workflow
+
+ START
+   │
+   ▼
+ ┌─────────┐
+ │ analyze │  Detect env vars, Dockerfile, dependencies
+ └────┬────┘
+      │
+      ▼
+ ┌─────────┐
+ │ enrich  │  Query Vault paths, load Consul conventions,
+ └────┬────┘  check Fabio routes - add suggestions to state
+      │
+      ▼
+ ┌──────────┐
+ │ question │  Include Vault path suggestions in questions
+ └────┬─────┘  "AWS keys detected - use secret/data/aws/transcription?"
+      │
+      ▼
+ ┌─────────┐
+ │ collect │  Human-in-the-loop - user confirms/modifies paths
+ └────┬────┘
+      │
+      ▼
+ ┌──────────┐
+ │ generate │  Auto-detect Nomad version, use appropriate
+ └────┬─────┘  Vault format (template vs native env stanza)
+      │
+      ▼
+ ┌──────────┐
+ │ validate │  Check Fabio conflicts (STRICT - block on conflict)
+ └────┬─────┘  Validate Vault paths accessible
+      │
+      ├── FAIL ──▶ Return validation errors
+      │
+      ▼
+ ┌────────┐
+ │ deploy │
+ └────┬───┘
+      │
+      ▼
+    END
+
+ ---
+ Implementation Order
+
+ Phase 1: Core Clients
+
+ 1. src/tools/vault.py - VaultClient with hvac
+ 2. src/tools/consul.py - ConsulClient with python-consul
+ 3. src/tools/fabio.py - FabioClient with httpx
+ 4. src/tools/nomad_version.py - Version detection
+ 5. Update config/settings.py
+ 6. Update pyproject.toml
+
+ Phase 2: LangChain Tools
+
+ 1. Add @tool functions to each client module
+ 2. Update src/tools/__init__.py to export tools
+ 3. Write unit tests
+
+ Phase 3: Workflow Nodes
+
+ 1. src/nodes/enrich.py - Enrichment node
+ 2. src/nodes/validate.py - Validation node
+ 3. Update src/graph.py with new nodes
+ 4. Update AgentState
+
+ Phase 4: HCL Enhancement
+
+ 1. Update src/tools/hcl.py for native vault env stanza
+ 2. Update src/nodes/generate.py for auto-detection
+ 3. Update analysis prompt for vault suggestions
+
+ Phase 5: Testing
+
+ 1. Unit tests for all new clients
+ 2. Integration tests with mock services
+ 3. Update .env.example
+
+ ---
+ Critical Files Summary
+
+ | File                       | Action | Purpose                                  |
+ |----------------------------|--------|------------------------------------------|
+ | src/tools/vault.py         | Create | Vault API client, secret path validation |
+ | src/tools/consul.py        | Create | Consul KV, service discovery             |
+ | src/tools/fabio.py         | Create | Route conflict detection                 |
+ | src/tools/nomad_version.py | Create | Auto-detect Nomad features               |
+ | src/nodes/enrich.py        | Create | Infrastructure enrichment node           |
+ | src/nodes/validate.py      | Create | Pre-deploy validation                    |
+ | config/settings.py         | Modify | Add Vault/Consul/Fabio settings          |
+ | src/tools/hcl.py           | Modify | Native vault env stanza support          |
+ | src/graph.py               | Modify | Add enrich/validate nodes                |
+ | src/nodes/generate.py      | Modify | Auto-select vault format                 |
+ | pyproject.toml             | Modify | Add hvac, python-consul, httpx           |
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+
+ Would you like to proceed?
+
+  Summary
+
+  I've successfully implemented full Vault, Consul, and Fabio integration for the Nomad Job Spec agent. Here's what was added:
+
+  New Files Created
+
+  1. src/tools/vault.py - Vault API client with:
+    - VaultClient class for querying secret metadata and validating paths
+    - VaultConventions for convention-based path suggestions
+    - LangChain tools: list_vault_secrets, suggest_vault_mappings, validate_vault_paths, get_vault_secret_keys
+  2. src/tools/consul.py - Consul client with:
+    - ConsulClient class for KV store and service discovery
+    - Conventions storage/retrieval from Consul KV at config/nomad-agent/conventions
+    - LangChain tools: query_consul_kv, list_consul_services, get_service_endpoints, get_agent_conventions, check_service_dependency
+  3. src/tools/fabio.py - Fabio route validation with:
+    - FabioClient class for querying routing table
+    - FabioRouteConflictError for strict mode validation
+    - LangChain tools: list_fabio_routes, validate_fabio_route, get_existing_hostnames, suggest_fabio_hostname, get_service_routes
+  4. src/tools/nomad_version.py - Nomad version detection with:
+    - NomadVersion dataclass with feature detection methods
+    - Auto-detection of Nomad 1.4+ for native vault env stanza support
+  5. src/nodes/enrich.py - New workflow node that:
+    - Queries Vault for secret path suggestions based on detected env vars
+    - Loads conventions from Consul KV
+    - Checks Fabio for route availability
+    - Detects Nomad version for feature selection
+    - Gracefully handles unavailable services
+  6. src/nodes/validate.py - Pre-deployment validation node that:
+    - Validates Fabio routes in STRICT mode (blocks deployment on conflicts)
+    - Validates Vault path accessibility
+    - Returns validation errors to prevent bad deployments
+
+  Files Modified
+
+  1. config/settings.py - Added settings for Vault, Consul, and Fabio addresses
+  2. pyproject.toml - Added hvac, python-consul, httpx dependencies
+  3. src/graph.py - Updated workflow with enrich and validate nodes, added new state fields
+  4. src/tools/hcl.py - Added support for Nomad 1.4+ native vault { env { } } stanza
+  5. src/nodes/generate.py - Enhanced context with Vault suggestions and Nomad version info
+
+  Updated Workflow
+
+  START -> analyze -> enrich -> question -> collect -> generate -> validate -> deploy -> verify
+
+  Key Features
+
+  - Vault Secrets: When you see env vars like AWS_ACCESS_KEY_ID, you can now answer "use secret/data/aws/transcription" and the agent will:
+    - Validate the path exists in Vault
+    - Generate proper Nomad job specs with either template blocks OR native env stanza (auto-detected based on Nomad version)
+  - Conventions: Stored in Consul KV at config/nomad-agent/conventions for centralized management
+  - Strict Mode: Fabio route conflicts block deployment
+  - Resilient Design: All infrastructure queries are wrapped in try/except so tests and development work even without Vault/Consul/Fabio running
+
+
+
