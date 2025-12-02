@@ -477,9 +477,43 @@ def _collect_deployment_prompt(analysis: dict) -> str:
     console.print(table)
     console.print()
 
+    # Handle Dockerfile selection
+    dockerfiles = analysis.get("dockerfiles_found", [])
+    selected_dockerfile = None
+
+    if len(dockerfiles) > 1:
+        # Multiple Dockerfiles found - let user choose
+        console.print(f"[bold]Found {len(dockerfiles)} Dockerfiles in the repository:[/bold]")
+        for i, df in enumerate(dockerfiles, 1):
+            console.print(f"  [cyan][{i}][/cyan] {df}")
+        console.print()
+
+        while True:
+            choice = Prompt.ask(
+                "[bold cyan]Select Dockerfile to deploy[/bold cyan]",
+                default="1"
+            )
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < len(dockerfiles):
+                    selected_dockerfile = dockerfiles[idx]
+                    break
+                console.print(f"[red]Please enter a number between 1 and {len(dockerfiles)}[/red]")
+            except ValueError:
+                console.print("[red]Please enter a valid number[/red]")
+        console.print()
+    elif len(dockerfiles) == 1:
+        selected_dockerfile = dockerfiles[0]
+
+    # Build the default prompt with Dockerfile info
+    if selected_dockerfile:
+        default_prompt = f"Deploy the Docker image defined in {selected_dockerfile}"
+    else:
+        default_prompt = "Deploy this application"
+
     return Prompt.ask(
         "[bold cyan]What would you like to deploy?[/bold cyan]",
-        default="Deploy this application"
+        default=default_prompt
     )
 
 

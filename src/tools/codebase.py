@@ -40,6 +40,7 @@ class CodebaseAnalysis:
 
     path: str
     dockerfile: DockerfileInfo | None = None
+    dockerfiles_found: list[str] = field(default_factory=list)
     dependencies: DependencyInfo | None = None
     env_vars_required: list[str] = field(default_factory=list)
     suggested_resources: dict[str, int] = field(default_factory=dict)
@@ -72,6 +73,7 @@ class CodebaseAnalysis:
             "env_vars_required": self.env_vars_required,
             "suggested_resources": self.suggested_resources,
             "files_analyzed": self.files_analyzed,
+            "dockerfiles_found": self.dockerfiles_found,
             "errors": self.errors,
         }
 
@@ -366,22 +368,39 @@ def analyze_codebase(codebase_path: str) -> CodebaseAnalysis:
     analysis = CodebaseAnalysis(path=str(path.absolute()))
     files_analyzed = []
 
-    # Find and parse Dockerfile
-    dockerfile_locations = [
-        path / "Dockerfile",
-        path / "dockerfile",
-        path / "docker" / "Dockerfile",
-        path / ".docker" / "Dockerfile",
-    ]
+    # Find all Dockerfiles in the repository
+    dockerfiles_found = []
+    # Use glob to find all Dockerfile variants
+    for dockerfile_path in path.glob("**/Dockerfile*"):
+        # Skip directories, backup files, and documentation
+        if dockerfile_path.is_dir():
+            continue
+        name = dockerfile_path.name.lower()
+        if name.endswith((".md", ".txt", ".bak", ".orig", ".swp", "~")):
+            continue
+        # Skip files in common non-source directories
+        rel_path = str(dockerfile_path.relative_to(path))
+        if any(part in rel_path.split("/") for part in ["node_modules", ".git", "vendor", "__pycache__"]):
+            continue
+        dockerfiles_found.append(rel_path)
 
-    for dockerfile_path in dockerfile_locations:
-        if dockerfile_path.exists():
-            try:
-                analysis.dockerfile = parse_dockerfile(str(dockerfile_path))
-                files_analyzed.append(str(dockerfile_path.relative_to(path)))
-                break
-            except Exception as e:
-                analysis.errors.append(f"Error parsing Dockerfile: {e}")
+    # Sort: prefer root Dockerfile first, then alphabetically
+    def dockerfile_sort_key(p: str) -> tuple:
+        depth = p.count("/")
+        is_plain_dockerfile = p.lower() in ("dockerfile", "dockerfile")
+        return (depth, not is_plain_dockerfile, p.lower())
+
+    dockerfiles_found.sort(key=dockerfile_sort_key)
+    analysis.dockerfiles_found = dockerfiles_found
+
+    # Parse the primary (first) Dockerfile for analysis
+    if dockerfiles_found:
+        primary_dockerfile = path / dockerfiles_found[0]
+        try:
+            analysis.dockerfile = parse_dockerfile(str(primary_dockerfile))
+            files_analyzed.append(dockerfiles_found[0])
+        except Exception as e:
+            analysis.errors.append(f"Error parsing Dockerfile: {e}")
 
     # Detect language and dependencies
     try:
