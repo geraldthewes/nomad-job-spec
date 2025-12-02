@@ -401,42 +401,47 @@ def analyze_codebase(
     analysis = CodebaseAnalysis(path=str(path.absolute()))
     files_analyzed = []
 
-    # Find all Dockerfiles in the repository
-    with create_span("find_dockerfiles", input={"path": str(path)}) as span:
-        dockerfiles_found = []
-        for dockerfile_path in path.glob("**/Dockerfile*"):
-            # Skip directories, backup files, and documentation
-            if dockerfile_path.is_dir():
-                continue
-            name = dockerfile_path.name.lower()
-            if name.endswith((".md", ".txt", ".bak", ".orig", ".swp", "~")):
-                continue
-            # Skip files in common non-source directories
-            rel_path = str(dockerfile_path.relative_to(path))
-            if any(part in rel_path.split("/") for part in ["node_modules", ".git", "vendor", "__pycache__"]):
-                continue
-            dockerfiles_found.append(rel_path)
+    # Determine which Dockerfile to parse
+    # If selected_dockerfile is provided (from discover node), use it directly
+    # Otherwise, search for Dockerfiles
+    dockerfile_to_parse = None
 
-        # Sort: prefer root Dockerfile first, then alphabetically
-        def dockerfile_sort_key(p: str) -> tuple:
-            depth = p.count("/")
-            is_plain_dockerfile = p.lower() in ("dockerfile", "dockerfile")
-            return (depth, not is_plain_dockerfile, p.lower())
+    if selected_dockerfile:
+        # Trust the selection from discover node - don't re-search
+        dockerfile_to_parse = selected_dockerfile
+        analysis.dockerfiles_found = [selected_dockerfile]
+    else:
+        # No pre-selection, find all Dockerfiles
+        with create_span("find_dockerfiles", input={"path": str(path)}) as span:
+            dockerfiles_found = []
+            for dockerfile_path in path.glob("**/Dockerfile*"):
+                # Skip directories, backup files, and documentation
+                if dockerfile_path.is_dir():
+                    continue
+                name = dockerfile_path.name.lower()
+                if name.endswith((".md", ".txt", ".bak", ".orig", ".swp", "~")):
+                    continue
+                # Skip files in common non-source directories
+                rel_path = str(dockerfile_path.relative_to(path))
+                if any(part in rel_path.split("/") for part in ["node_modules", ".git", "vendor", "__pycache__"]):
+                    continue
+                dockerfiles_found.append(rel_path)
 
-        dockerfiles_found.sort(key=dockerfile_sort_key)
-        analysis.dockerfiles_found = dockerfiles_found
-        span.end(output={"dockerfiles_found": dockerfiles_found, "count": len(dockerfiles_found)})
+            # Sort: prefer root Dockerfile first, then alphabetically
+            def dockerfile_sort_key(p: str) -> tuple:
+                depth = p.count("/")
+                is_plain_dockerfile = p.lower() in ("dockerfile", "dockerfile")
+                return (depth, not is_plain_dockerfile, p.lower())
 
-    # Parse the selected (or first) Dockerfile for analysis
-    if dockerfiles_found:
-        # Use selected dockerfile if provided, otherwise use first found
-        dockerfile_to_parse = selected_dockerfile if selected_dockerfile else dockerfiles_found[0]
+            dockerfiles_found.sort(key=dockerfile_sort_key)
+            analysis.dockerfiles_found = dockerfiles_found
+            span.end(output={"dockerfiles_found": dockerfiles_found, "count": len(dockerfiles_found)})
 
-        # Validate selection exists in found list
-        if dockerfile_to_parse not in dockerfiles_found:
-            analysis.errors.append(f"Selected Dockerfile '{dockerfile_to_parse}' not found")
-            dockerfile_to_parse = dockerfiles_found[0]
+            if dockerfiles_found:
+                dockerfile_to_parse = dockerfiles_found[0]
 
+    # Parse the Dockerfile
+    if dockerfile_to_parse:
         primary_dockerfile = path / dockerfile_to_parse
         with create_span("parse_dockerfile", input={"dockerfile": dockerfile_to_parse}) as span:
             try:

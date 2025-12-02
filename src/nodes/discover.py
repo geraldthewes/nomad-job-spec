@@ -96,7 +96,12 @@ def discover_dockerfiles_node(state: dict[str, Any]) -> dict[str, Any]:
     # Log discovery results - selection happens via interrupt
     selected_dockerfile = None
     if len(dockerfiles_found) == 0:
-        logger.warning("No Dockerfiles found in codebase")
+        if trace:
+            trace.end(level="ERROR", status_message="No Dockerfiles found in codebase")
+        raise FileNotFoundError(
+            f"No Dockerfiles found in {codebase_path}. "
+            "Please ensure the codebase contains a Dockerfile."
+        )
     elif len(dockerfiles_found) == 1:
         logger.info(f"Found 1 Dockerfile: {dockerfiles_found[0]} - awaiting confirmation")
     else:
