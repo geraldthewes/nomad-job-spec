@@ -179,7 +179,7 @@ def generate(
         if dockerfiles and not selected and not no_questions:
             selected = _collect_dockerfile_selection(current_state.values)
             if selected:
-                graph.update_state(config, {"selected_dockerfile": selected})
+                graph.update_state(config, {"selected_dockerfile": selected}, as_node="select")
 
         # Continue to analysis (whether selection was made or skipped)
         with console.status("[bold green]Analyzing codebase..."):
@@ -197,19 +197,10 @@ def generate(
         analysis = current_state.values.get("codebase_analysis", {})
         selected_dockerfile = current_state.values.get("selected_dockerfile")
 
-        # If no prompt was provided, collect it interactively after analysis
-        if not prompt and not no_questions:
-            prompt = _collect_deployment_prompt(analysis, selected_dockerfile)
+        # If no prompt was provided, auto-generate based on selected Dockerfile
+        if not prompt:
+            prompt = f"Deploy using {selected_dockerfile}" if selected_dockerfile else "Deploy this application"
             graph.update_state(config, {"prompt": prompt})
-
-            # Show configuration now that we have the prompt
-            console.print(Panel(
-                f"[bold]Nomad Job Spec Generator[/bold]\n\n"
-                f"Prompt: {prompt}\n"
-                f"Codebase: {path}\n"
-                f"Datacenter: {settings.nomad_datacenter}  Namespace: {cluster_id}",
-                title="Configuration",
-            ))
 
         if not no_questions and current_state.values.get("questions"):
             # Display questions and collect responses
@@ -608,57 +599,6 @@ def _collect_dockerfile_selection(state: dict) -> str | None:
             console.print(f"[red]Please enter a number between 1 and {len(dockerfiles)}[/red]")
         except ValueError:
             console.print("[red]Please enter a valid number[/red]")
-
-
-def _collect_deployment_prompt(analysis: dict, selected_dockerfile: str | None = None) -> str:
-    """Display analysis summary and collect deployment prompt from user.
-
-    Args:
-        analysis: The codebase analysis results.
-        selected_dockerfile: The Dockerfile selected earlier (already determined).
-
-    Returns:
-        User's deployment prompt.
-    """
-    console.print("\n[bold]Codebase Analysis Complete[/bold]\n")
-
-    # Build summary table
-    table = Table(title="Analysis Summary")
-    table.add_column("Property", style="cyan")
-    table.add_column("Value", style="green")
-
-    dockerfile = analysis.get("dockerfile", {})
-    if dockerfile:
-        table.add_row("Base Image", dockerfile.get("base_image") or "Not found")
-        ports = dockerfile.get("exposed_ports", [])
-        if ports:
-            table.add_row("Exposed Ports", ", ".join(map(str, ports)))
-
-    deps = analysis.get("dependencies", {})
-    if deps:
-        table.add_row("Language", deps.get("language") or "Unknown")
-
-    env_vars = analysis.get("env_vars_required", [])[:5]
-    if env_vars:
-        table.add_row("Env Vars Detected", ", ".join(env_vars))
-
-    resources = analysis.get("suggested_resources", {})
-    table.add_row("Suggested CPU", f"{resources.get('cpu', 500)} MHz")
-    table.add_row("Suggested Memory", f"{resources.get('memory', 256)} MB")
-
-    console.print(table)
-    console.print()
-
-    # Build the default prompt with Dockerfile info (selection already happened earlier)
-    if selected_dockerfile:
-        default_prompt = f"Deploy the Docker image defined in {selected_dockerfile}"
-    else:
-        default_prompt = "Deploy this application"
-
-    return Prompt.ask(
-        "[bold cyan]What would you like to deploy?[/bold cyan]",
-        default=default_prompt
-    )
 
 
 def _display_analysis_table(analysis):
