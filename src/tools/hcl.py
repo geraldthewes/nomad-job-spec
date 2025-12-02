@@ -95,6 +95,7 @@ class JobConfig:
     network_mode: NetworkMode = NetworkMode.BRIDGE
     ports: list[PortConfig] = field(default_factory=list)
     env_vars: dict[str, str] = field(default_factory=dict)
+    consul_vars: dict[str, str] = field(default_factory=dict)  # env_var -> consul_kv_path
     dns_servers: list[str] = field(default_factory=list)
 
     # Architecture constraint
@@ -392,7 +393,11 @@ def _build_task_block(config: JobConfig) -> str:
         else:
             parts.append(_build_vault_templates(config.vault))
 
-    # Environment variables
+    # Consul KV templates for non-secret configuration
+    if config.consul_vars:
+        parts.append(_build_consul_templates(config.consul_vars))
+
+    # Environment variables (fixed values)
     if config.env_vars:
         parts.append(_build_env_block(config))
 
@@ -511,6 +516,40 @@ def _parse_vault_path(secret_path: str) -> tuple[str, str]:
 
     # No key specified, default to "value"
     return secret_path, "value"
+
+
+def _build_consul_templates(consul_vars: dict[str, str]) -> str:
+    """Build Consul KV templates for environment variables.
+
+    Generates Nomad template blocks that read values from Consul KV store.
+    Each variable gets its own template block that writes to a .env file.
+    The template outputs KEY=VALUE format which is parsed when env=true.
+
+    Args:
+        consul_vars: Dict mapping env var names to Consul KV paths.
+                    e.g., {"REDIS_URL": "myapp/config/redis_url"}
+
+    Returns:
+        HCL template blocks as a string.
+    """
+    if not consul_vars:
+        return ""
+
+    parts = []
+
+    for env_var, consul_path in consul_vars.items():
+        template = f'''
+      template {{
+        data = <<EOH
+{env_var}={{{{ key "{consul_path}" }}}}
+EOH
+        destination = "local/{env_var.lower()}.env"
+        env         = true
+        change_mode = "restart"
+      }}'''
+        parts.append(template)
+
+    return "\n".join(parts)
 
 
 def _build_env_block(config: JobConfig) -> str:

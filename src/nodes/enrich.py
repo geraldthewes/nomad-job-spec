@@ -11,7 +11,13 @@ import logging
 from typing import Any
 
 from config.settings import Settings, get_settings
-from src.tools.vault import VaultClient, VaultConventions, get_vault_client, set_vault_client
+from src.tools.vault import (
+    VaultClient,
+    VaultConventions,
+    get_vault_client,
+    set_vault_client,
+    suggest_env_configs,
+)
 from src.tools.consul import ConsulClient, get_consul_client, set_consul_client
 from src.tools.fabio import FabioClient, get_fabio_client, set_fabio_client
 from src.tools.nomad_version import get_cached_nomad_version
@@ -186,8 +192,25 @@ def create_enrich_node(
                 except Exception as e:
                     logger.warning(f"Failed to set Vault conventions: {e}")
 
-        # 3. Query Vault for secret path suggestions
+        # 3. Generate multi-source env var configurations
         env_vars = analysis.get("env_vars_required", [])
+        env_var_configs: list[dict] = []
+
+        if env_vars:
+            try:
+                # Use new multi-source suggestion logic
+                configs = suggest_env_configs(env_vars, app_name, vault)
+                env_var_configs = [cfg.to_dict() for cfg in configs]
+                logger.info(
+                    f"Generated {len(env_var_configs)} env var configs "
+                    f"(fixed: {sum(1 for c in configs if c.source == 'fixed')}, "
+                    f"consul: {sum(1 for c in configs if c.source == 'consul')}, "
+                    f"vault: {sum(1 for c in configs if c.source == 'vault')})"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to suggest env var configs: {e}")
+
+        # Also maintain legacy vault_suggestions for backward compatibility
         if env_vars and vault is not None:
             try:
                 suggestions = vault.suggest_mappings(env_vars, app_name)
@@ -288,7 +311,8 @@ def create_enrich_node(
 
         return {
             **state,
-            "vault_suggestions": vault_suggestions,
+            "env_var_configs": env_var_configs,  # Multi-source env var configurations
+            "vault_suggestions": vault_suggestions,  # Legacy, for backward compatibility
             "consul_conventions": consul_conventions,
             "consul_services": consul_services,
             "fabio_validation": fabio_validation,

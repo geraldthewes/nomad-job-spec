@@ -10,7 +10,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import hvac
 from hvac.exceptions import Forbidden, InvalidPath, VaultError
@@ -38,6 +38,41 @@ class VaultPathSuggestion:
     suggested_path: str
     key: str
     confidence: float  # 0.0-1.0 based on naming conventions
+
+
+@dataclass
+class EnvVarConfig:
+    """Configuration for an environment variable with its source.
+
+    Environment variables can come from different sources:
+    - fixed: Static value set directly in the job spec (e.g., APP_HOST=0.0.0.0)
+    - consul: Value from Consul KV store (non-secret configuration)
+    - vault: Secret value from HashiCorp Vault
+    """
+
+    name: str  # Environment variable name
+    source: Literal["fixed", "consul", "vault"]  # Source type
+    value: str  # Fixed value, Consul KV path, or Vault path
+    confidence: float = 0.0  # 0.0-1.0 confidence in the suggestion
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary representation."""
+        return {
+            "name": self.name,
+            "source": self.source,
+            "value": self.value,
+            "confidence": self.confidence,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "EnvVarConfig":
+        """Create from dictionary representation."""
+        return cls(
+            name=data["name"],
+            source=data["source"],
+            value=data["value"],
+            confidence=data.get("confidence", 0.0),
+        )
 
 
 @dataclass
@@ -344,6 +379,177 @@ class VaultClient:
                 )
 
         return None
+
+
+def suggest_env_configs(
+    env_vars: list[str],
+    app_name: str,
+    vault_client: VaultClient | None = None,
+) -> list[EnvVarConfig]:
+    """Suggest environment variable configurations with appropriate sources.
+
+    Analyzes variable names to infer the best source (fixed, consul, or vault)
+    and provides smart defaults where applicable.
+
+    Args:
+        env_vars: List of environment variable names.
+        app_name: Application name for path interpolation.
+        vault_client: Optional VaultClient for Vault path validation.
+
+    Returns:
+        List of EnvVarConfig with suggested sources and values.
+    """
+    configs = []
+
+    # Fixed value patterns with smart defaults
+    fixed_patterns: dict[str, tuple[str, float]] = {
+        # Exact matches
+        "HOST": ("0.0.0.0", 0.8),
+        "APP_HOST": ("0.0.0.0", 0.8),
+        "BIND_HOST": ("0.0.0.0", 0.8),
+        "LISTEN_HOST": ("0.0.0.0", 0.8),
+        "PORT": ("8080", 0.6),
+        "APP_PORT": ("8080", 0.6),
+        "HTTP_PORT": ("8080", 0.6),
+        "LISTEN_PORT": ("8080", 0.6),
+        "CONSUL_HOST": ("consul.service.consul", 0.6),
+        "CONSUL_HTTP_ADDR": ("http://consul.service.consul:8500", 0.6),
+        "CONSUL_ADDR": ("consul.service.consul:8500", 0.6),
+        "LOG_LEVEL": ("info", 0.5),
+        "DEBUG": ("false", 0.5),
+        "ENVIRONMENT": ("production", 0.4),
+        "ENV": ("production", 0.4),
+    }
+
+    # Secret patterns that should use Vault
+    secret_keywords = [
+        "PASSWORD",
+        "PASS",
+        "PWD",
+        "SECRET",
+        "KEY",
+        "TOKEN",
+        "CREDENTIAL",
+        "PRIVATE",
+        "API_KEY",
+        "APIKEY",
+        "AUTH",
+    ]
+
+    # AWS-specific patterns (always Vault)
+    aws_mappings: dict[str, str] = {
+        "AWS_ACCESS_KEY_ID": "access_key",
+        "AWS_SECRET_ACCESS_KEY": "secret_key",
+        "AWS_SESSION_TOKEN": "session_token",
+        "AWS_REGION": "region",
+    }
+
+    for env_var in env_vars:
+        env_upper = env_var.upper()
+
+        # Check for exact fixed pattern match first
+        if env_upper in fixed_patterns:
+            default_value, confidence = fixed_patterns[env_upper]
+            configs.append(
+                EnvVarConfig(
+                    name=env_var,
+                    source="fixed",
+                    value=default_value,
+                    confidence=confidence,
+                )
+            )
+            continue
+
+        # Check for AWS patterns (always Vault)
+        if env_upper in aws_mappings:
+            key = aws_mappings[env_upper]
+            vault_path = f"secret/data/aws/{app_name}#{key}"
+            # Validate if client available
+            confidence = 0.5
+            if vault_client:
+                is_valid, _ = vault_client.validate_path(f"secret/data/aws/{app_name}")
+                confidence = 0.9 if is_valid else 0.5
+            configs.append(
+                EnvVarConfig(
+                    name=env_var,
+                    source="vault",
+                    value=vault_path,
+                    confidence=confidence,
+                )
+            )
+            continue
+
+        # Check if it looks like a secret (Vault)
+        is_secret = any(kw in env_upper for kw in secret_keywords)
+        if is_secret:
+            # Determine service category from variable name
+            service = "app"
+            for svc in ["DB", "DATABASE", "REDIS", "MONGO", "POSTGRES", "MYSQL", "RABBIT", "KAFKA"]:
+                if svc in env_upper:
+                    service = "db" if svc in ["DB", "DATABASE", "POSTGRES", "MYSQL"] else svc.lower()
+                    break
+
+            # Determine key name
+            key = "value"
+            for kw in ["PASSWORD", "PASS", "PWD"]:
+                if kw in env_upper:
+                    key = "password"
+                    break
+            for kw in ["TOKEN"]:
+                if kw in env_upper:
+                    key = "token"
+                    break
+            for kw in ["SECRET", "KEY"]:
+                if kw in env_upper:
+                    key = "key"
+                    break
+
+            vault_path = f"secret/data/{app_name}/{service}#{key}"
+            confidence = 0.5
+            if vault_client:
+                is_valid, _ = vault_client.validate_path(f"secret/data/{app_name}/{service}")
+                confidence = 0.7 if is_valid else 0.5
+            configs.append(
+                EnvVarConfig(
+                    name=env_var,
+                    source="vault",
+                    value=vault_path,
+                    confidence=confidence,
+                )
+            )
+            continue
+
+        # Check for URL/connection patterns (likely Consul for non-secrets)
+        url_keywords = ["URL", "ADDR", "ENDPOINT", "HOST", "URI"]
+        is_url_pattern = any(kw in env_upper for kw in url_keywords)
+        if is_url_pattern:
+            # Use Consul KV path
+            # Convert variable name to a sensible path component
+            path_component = env_var.lower().replace("_", "/")
+            consul_path = f"{app_name}/config/{path_component}"
+            configs.append(
+                EnvVarConfig(
+                    name=env_var,
+                    source="consul",
+                    value=consul_path,
+                    confidence=0.4,
+                )
+            )
+            continue
+
+        # Default: suggest Consul for unknown configuration
+        path_component = env_var.lower().replace("_", "/")
+        consul_path = f"{app_name}/config/{path_component}"
+        configs.append(
+            EnvVarConfig(
+                name=env_var,
+                source="consul",
+                value=consul_path,
+                confidence=0.3,
+            )
+        )
+
+    return configs
 
 
 # Global client instance (lazy initialization)

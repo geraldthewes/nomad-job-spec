@@ -125,6 +125,10 @@ def generate_spec_node(
     vault_suggestions = state.get("vault_suggestions", {})
     fabio_validation = state.get("fabio_validation", {})
     nomad_info = state.get("nomad_info", {})
+    env_var_configs = state.get("env_var_configs", [])
+
+    # Extract confirmed env configs from user responses if available
+    confirmed_env_configs = _extract_confirmed_env_configs(user_responses, env_var_configs)
 
     # Build context for LLM with enrichment data
     context = _build_generation_context(
@@ -135,6 +139,7 @@ def generate_spec_node(
         vault_suggestions=vault_suggestions,
         fabio_validation=fabio_validation,
         nomad_info=nomad_info,
+        env_var_configs=confirmed_env_configs,
     )
 
     # Query LLM for configuration
@@ -149,8 +154,14 @@ def generate_spec_node(
     # Parse LLM response into JobConfig
     try:
         config_dict = _parse_llm_response(response_text)
-        # Pass nomad_info to enable native vault format when supported
-        config = _build_job_config(config_dict, analysis, settings, nomad_info)
+        # Pass nomad_info and env_var_configs for proper configuration
+        config = _build_job_config(
+            config_dict,
+            analysis,
+            settings,
+            nomad_info,
+            env_var_configs=confirmed_env_configs,
+        )
     except Exception as e:
         # Fallback to basic config from analysis
         config = _build_fallback_config(analysis, prompt, settings)
@@ -180,6 +191,7 @@ def _build_generation_context(
     vault_suggestions: dict[str, Any] | None = None,
     fabio_validation: dict[str, Any] | None = None,
     nomad_info: dict[str, Any] | None = None,
+    env_var_configs: list[dict] | None = None,
 ) -> str:
     """Build context string for LLM generation."""
     parts = [
@@ -197,8 +209,36 @@ def _build_generation_context(
             f"```json\n{json.dumps(user_responses, indent=2)}\n```",
         ])
 
-    # Add Vault suggestions if available
-    if vault_suggestions and vault_suggestions.get("suggestions"):
+    # Add confirmed env var configurations (multi-source)
+    # These take precedence over vault_suggestions
+    if env_var_configs:
+        fixed_vars = [c for c in env_var_configs if c.get("source") == "fixed"]
+        consul_vars = [c for c in env_var_configs if c.get("source") == "consul"]
+        vault_vars = [c for c in env_var_configs if c.get("source") == "vault"]
+
+        parts.extend([
+            "",
+            "## Environment Variable Configuration (User Confirmed)",
+            "Use exactly these configurations for environment variables:",
+        ])
+
+        if fixed_vars:
+            parts.append("\nFixed values (set directly in env block):")
+            for c in fixed_vars:
+                parts.append(f"  - {c['name']}: \"{c['value']}\"")
+
+        if consul_vars:
+            parts.append("\nConsul KV paths (use template to read from Consul):")
+            for c in consul_vars:
+                parts.append(f"  - {c['name']}: {c['value']}")
+
+        if vault_vars:
+            parts.append("\nVault secrets (use Vault integration):")
+            for c in vault_vars:
+                parts.append(f"  - {c['name']}: {c['value']}")
+
+    # Fallback: Add Vault suggestions if no confirmed configs
+    elif vault_suggestions and vault_suggestions.get("suggestions"):
         parts.extend([
             "",
             "## Vault Secret Path Suggestions",
@@ -244,6 +284,31 @@ def _build_generation_context(
     return "\n".join(parts)
 
 
+def _extract_confirmed_env_configs(
+    user_responses: dict[str, Any],
+    default_configs: list[dict],
+) -> list[dict]:
+    """Extract confirmed env var configs from user responses.
+
+    User responses may contain structured env_configs responses from
+    the interactive collection flow.
+
+    Args:
+        user_responses: Dict of user responses to questions.
+        default_configs: Default configs from enrich node to use if no user input.
+
+    Returns:
+        List of confirmed env var config dicts.
+    """
+    # Look for env_configs response in user_responses
+    for key, value in user_responses.items():
+        if isinstance(value, dict) and value.get("type") == "env_configs":
+            return value.get("configs", [])
+
+    # Fallback to default configs from enrich node
+    return default_configs
+
+
 def _parse_llm_response(response_text: str) -> dict[str, Any]:
     """Parse LLM response to extract job configuration."""
     # Try to extract JSON from response
@@ -265,8 +330,17 @@ def _build_job_config(
     analysis: dict[str, Any],
     settings,
     nomad_info: dict[str, Any] | None = None,
+    env_var_configs: list[dict] | None = None,
 ) -> JobConfig:
-    """Build JobConfig from LLM response and analysis."""
+    """Build JobConfig from LLM response and analysis.
+
+    Args:
+        config_dict: Parsed LLM response.
+        analysis: Codebase analysis.
+        settings: App settings.
+        nomad_info: Nomad version info.
+        env_var_configs: Confirmed multi-source env var configurations.
+    """
     # Get job name
     job_name = config_dict.get("job_name", "unnamed-job")
     job_name = sanitize_job_name(job_name)
@@ -311,8 +385,27 @@ def _build_job_config(
     if not ports:
         ports = [PortConfig(name="http", container_port=8080)]  # Default
 
-    # Get environment variables
-    env_vars = config_dict.get("env_vars", {})
+    # Build environment variables from confirmed configs (multi-source)
+    env_vars = {}
+    consul_vars = {}
+    vault_secrets = {}
+
+    if env_var_configs:
+        for cfg in env_var_configs:
+            name = cfg.get("name")
+            source = cfg.get("source")
+            value = cfg.get("value", "")
+
+            if source == "fixed":
+                env_vars[name] = value
+            elif source == "consul":
+                consul_vars[name] = value
+            elif source == "vault":
+                vault_secrets[name] = value
+    else:
+        # Fallback to LLM-provided values
+        env_vars = config_dict.get("env_vars", {})
+        vault_secrets = config_dict.get("vault_secrets", {})
 
     # Get resources (None means use service_type defaults)
     cpu = config_dict.get("cpu")
@@ -347,9 +440,10 @@ def _build_job_config(
             owner_gid=vol.get("owner_gid"),
         ))
 
-    # Build Vault config if specified
+    # Build Vault config if we have vault secrets or policies
     vault = None
-    if config_dict.get("vault_policies") or config_dict.get("vault_secrets"):
+    all_vault_secrets = {**vault_secrets, **config_dict.get("vault_secrets", {})}
+    if config_dict.get("vault_policies") or all_vault_secrets:
         # Check if Nomad supports native vault env stanza
         use_native_env = False
         if nomad_info:
@@ -357,11 +451,11 @@ def _build_job_config(
 
         vault = VaultConfig(
             policies=config_dict.get("vault_policies", []),
-            secrets=config_dict.get("vault_secrets", {}),
+            secrets=all_vault_secrets,
             use_native_env=use_native_env,
         )
 
-    # Build config
+    # Build config with multi-source env vars
     return JobConfig(
         job_name=job_name,
         datacenters=[settings.nomad_datacenter],
@@ -370,6 +464,7 @@ def _build_job_config(
         image=image,
         ports=ports,
         env_vars=env_vars,
+        consul_vars=consul_vars,
         service_type=service_type,
         cpu=cpu,
         memory=memory,

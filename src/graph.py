@@ -56,7 +56,8 @@ class AgentState(dict):
     cluster_id: str
 
     # Infrastructure enrichment (from enrich node)
-    vault_suggestions: dict[str, Any]
+    env_var_configs: list[dict[str, Any]]  # Multi-source env var configurations
+    vault_suggestions: dict[str, Any]  # Legacy, for backward compatibility
     consul_conventions: dict[str, Any]
     consul_services: dict[str, Any]
     fabio_validation: dict[str, Any]
@@ -103,6 +104,7 @@ def create_initial_state(
         "relevant_memories": [],
         "cluster_id": cluster_id,
         # Infrastructure enrichment
+        "env_var_configs": [],
         "vault_suggestions": {},
         "consul_conventions": {},
         "consul_services": {},
@@ -117,10 +119,11 @@ def generate_questions_node(state: dict[str, Any]) -> dict[str, Any]:
     """Generate clarifying questions based on analysis.
 
     This node creates questions to ask the user before generating the spec.
-    Now enhanced with Vault path suggestions from enrichment.
+    Now enhanced with multi-source env var configurations from enrichment.
     """
     analysis = state.get("codebase_analysis", {})
-    vault_suggestions = state.get("vault_suggestions", {})
+    env_var_configs = state.get("env_var_configs", [])
+    vault_suggestions = state.get("vault_suggestions", {})  # Legacy fallback
     fabio_validation = state.get("fabio_validation", {})
     questions = []
 
@@ -129,22 +132,27 @@ def generate_questions_node(state: dict[str, Any]) -> dict[str, Any]:
     if not dockerfile or not dockerfile.get("base_image"):
         questions.append("What Docker image should be used for this deployment?")
 
-    # Enhanced environment variable question with Vault suggestions
-    # Uses structured dict for interactive step-by-step confirmation
+    # Environment variable configuration with multi-source support
     env_vars = analysis.get("env_vars_required", [])
     if env_vars:
-        suggestions = vault_suggestions.get("suggestions", [])
-        if suggestions:
-            # Structured question for interactive Vault path confirmation
+        if env_var_configs:
+            # New format: multi-source configuration
+            questions.append({
+                "type": "env_configs",
+                "configs": env_var_configs[:15],  # Limit to first 15
+                "prompt": "Environment variable configuration",
+            })
+        elif vault_suggestions.get("suggestions"):
+            # Legacy fallback: Vault-only suggestions
             questions.append({
                 "type": "vault_paths",
-                "suggestions": suggestions[:10],  # Limit to first 10
+                "suggestions": vault_suggestions["suggestions"][:10],
                 "prompt": "Environment variable Vault paths",
             })
         else:
             questions.append(
                 f"The following environment variables were detected: {', '.join(env_vars[:5])}. "
-                "What Vault paths should be used for these secrets?"
+                "How should these be configured? (fixed value, Consul KV, or Vault secret)"
             )
 
     # Check for ports

@@ -289,18 +289,34 @@ def _collect_user_responses(state: dict) -> dict[str, Any]:
     """Collect user responses to generated questions.
 
     Handles both plain string questions and structured questions
-    (like vault_paths which use interactive step-by-step flow).
+    (like env_configs or vault_paths which use interactive step-by-step flow).
     """
     questions = state.get("questions", [])
     responses = {}
 
+    # Get app_name for context in prompts
+    app_name = state.get("app_name", "app")
+
     console.print("\n[bold]Please answer the following questions:[/bold]\n")
 
     for i, question in enumerate(questions, 1):
-        if isinstance(question, dict) and question.get("type") == "vault_paths":
-            # Route to interactive Vault path handler
-            vault_responses = _collect_vault_path_responses(question["suggestions"])
-            responses[f"q{i}"] = vault_responses
+        if isinstance(question, dict):
+            q_type = question.get("type")
+            if q_type == "env_configs":
+                # Route to interactive env config handler (new format)
+                env_configs = _collect_env_config_responses(
+                    question["configs"],
+                    app_name,
+                )
+                responses[f"q{i}"] = {"type": "env_configs", "configs": env_configs}
+            elif q_type == "vault_paths":
+                # Route to legacy Vault path handler for backward compatibility
+                vault_responses = _collect_vault_path_responses(question["suggestions"])
+                responses[f"q{i}"] = vault_responses
+            else:
+                # Unknown structured question type, ask as string
+                response = Prompt.ask(f"[cyan]{i}.[/cyan] {question}")
+                responses[f"q{i}"] = response
         else:
             # Original behavior for plain string questions
             response = Prompt.ask(f"[cyan]{i}.[/cyan] {question}")
@@ -309,35 +325,36 @@ def _collect_user_responses(state: dict) -> dict[str, Any]:
     return responses
 
 
-def _collect_vault_path_responses(suggestions: list[dict]) -> dict[str, str]:
-    """Interactive step-by-step Vault path confirmation.
+def _collect_env_config_responses(
+    configs: list[dict],
+    app_name: str,
+) -> list[dict]:
+    """Interactive step-by-step environment variable configuration.
 
     Flow:
     1. Show summary table of all suggestions
     2. Ask confirm/edit
-    3. If edit: step through each variable one by one with pre-filled defaults
+    3. If edit: step through each variable one by one, asking for source and value
     4. Show final summary and ask confirm/edit again
-    5. Return final mappings as {env_var: vault_path}
+    5. Return final configurations
 
     Args:
-        suggestions: List of suggestion dicts with keys:
-            - env_var: Environment variable name
-            - suggested_path: Vault path (without key)
-            - key: Key within the Vault path
+        configs: List of env config dicts with keys:
+            - name: Environment variable name
+            - source: Source type ("fixed", "consul", "vault")
+            - value: Fixed value, Consul path, or Vault path
             - confidence: Confidence score (0.0-1.0)
-            - vault_reference: Full path#key reference
+        app_name: Application name for display hints.
 
     Returns:
-        Dict mapping env_var names to confirmed vault_reference paths.
+        List of confirmed env config dicts.
     """
-    # Build initial paths from suggestions
-    paths = {}
-    for s in suggestions:
-        paths[s["env_var"]] = s.get("vault_reference") or f"{s['suggested_path']}#{s['key']}"
+    # Work with a copy to avoid mutating the original
+    current_configs = [dict(c) for c in configs]
 
     while True:
         # Display summary table
-        _display_vault_suggestions_table(suggestions, paths)
+        _display_env_config_table(current_configs)
 
         # Ask confirm/edit
         choice = Prompt.ask(
@@ -347,58 +364,123 @@ def _collect_vault_path_responses(suggestions: list[dict]) -> dict[str, str]:
         )
 
         if choice == "confirm":
-            return paths
+            return current_configs
 
         # Edit mode: step through each variable
-        console.print("\n[dim]Press Enter to accept the suggested path, or type a new path.[/dim]\n")
+        console.print("\n[dim]For each variable, select a source and provide the value/path.[/dim]\n")
 
-        for idx, s in enumerate(suggestions, 1):
-            env_var = s["env_var"]
-            current_path = paths[env_var]
+        for idx, cfg in enumerate(current_configs, 1):
+            var_name = cfg["name"]
+            console.print(f"[cyan][{idx}/{len(current_configs)}][/cyan] [bold]{var_name}[/bold]")
 
-            new_path = Prompt.ask(
-                f"[cyan][{idx}/{len(suggestions)}][/cyan] {env_var}",
-                default=current_path
+            # Ask for source type
+            new_source = Prompt.ask(
+                "  Source",
+                choices=["fixed", "consul", "vault"],
+                default=cfg["source"]
             )
-            paths[env_var] = new_path
+
+            # Provide context-appropriate hint for value
+            if new_source == "fixed":
+                hint = "Value"
+            elif new_source == "consul":
+                hint = f"Consul KV path (e.g., {app_name}/config/...)"
+            else:
+                hint = "Vault path (e.g., secret/data/.../key)"
+
+            new_value = Prompt.ask(
+                f"  {hint}",
+                default=cfg["value"]
+            )
+
+            # Update the config
+            cfg["source"] = new_source
+            cfg["value"] = new_value
+            cfg["confidence"] = 1.0  # User confirmed
+
+            console.print()  # Blank line between variables
 
         # After editing all, show final summary (loop back to top)
-        console.print()  # Blank line before showing table again
 
 
-def _display_vault_suggestions_table(suggestions: list[dict], paths: dict[str, str]):
-    """Display Vault path suggestions in a formatted table.
+def _display_env_config_table(configs: list[dict]):
+    """Display environment variable configurations in a formatted table.
 
     Args:
-        suggestions: Original suggestions with confidence info.
-        paths: Current path mappings (may differ from original suggestions).
+        configs: List of env config dicts with name, source, value, confidence.
     """
-    table = Table(title="Vault Path Configuration")
+    table = Table(title="Environment Variable Configuration")
     table.add_column("Variable", style="cyan")
-    table.add_column("Path", style="green")
+    table.add_column("Source", style="magenta", justify="center")
+    table.add_column("Value/Path", style="green")
     table.add_column("Confidence", justify="right")
 
-    for s in suggestions:
-        env_var = s["env_var"]
-        current_path = paths.get(env_var, "")
-        original_path = s.get("vault_reference") or f"{s['suggested_path']}#{s['key']}"
+    for cfg in configs:
+        var_name = cfg["name"]
+        source = cfg["source"]
+        value = cfg["value"]
+        confidence = cfg.get("confidence", 0)
 
-        # Show confidence for original suggestion, or "custom" if user changed it
-        if current_path == original_path:
-            confidence = s.get("confidence", 0)
-            if confidence >= 0.9:
-                conf_str = "[green]validated[/green]"
-            elif confidence >= 0.5:
-                conf_str = f"[yellow]{int(confidence * 100)}%[/yellow]"
-            else:
-                conf_str = f"[red]{int(confidence * 100)}%[/red]"
+        # Source styling
+        if source == "fixed":
+            source_str = "[blue]fixed[/blue]"
+        elif source == "consul":
+            source_str = "[yellow]consul[/yellow]"
         else:
-            conf_str = "[blue]custom[/blue]"
+            source_str = "[magenta]vault[/magenta]"
 
-        table.add_row(env_var, current_path, conf_str)
+        # Confidence styling
+        if confidence >= 0.9:
+            conf_str = "[green]validated[/green]"
+        elif confidence >= 0.5:
+            conf_str = f"[yellow]{int(confidence * 100)}%[/yellow]"
+        else:
+            conf_str = f"[red]{int(confidence * 100)}%[/red]"
+
+        table.add_row(var_name, source_str, value, conf_str)
 
     console.print()
     console.print(table)
+
+
+# Keep backward compatibility aliases
+def _collect_vault_path_responses(suggestions: list[dict]) -> dict[str, str]:
+    """Legacy function for backward compatibility.
+
+    Converts vault-only suggestions to env configs and back.
+    """
+    # Convert vault suggestions to env config format
+    configs = []
+    for s in suggestions:
+        vault_ref = s.get("vault_reference") or f"{s['suggested_path']}#{s['key']}"
+        configs.append({
+            "name": s["env_var"],
+            "source": "vault",
+            "value": vault_ref,
+            "confidence": s.get("confidence", 0.5),
+        })
+
+    # Use the new function
+    app_name = "app"  # Default for legacy calls
+    result_configs = _collect_env_config_responses(configs, app_name)
+
+    # Convert back to vault path dict format
+    return {c["name"]: c["value"] for c in result_configs}
+
+
+def _display_vault_suggestions_table(suggestions: list[dict], paths: dict[str, str]):
+    """Legacy function for backward compatibility."""
+    # Convert to env config format for display
+    configs = []
+    for s in suggestions:
+        env_var = s["env_var"]
+        configs.append({
+            "name": env_var,
+            "source": "vault",
+            "value": paths.get(env_var, ""),
+            "confidence": s.get("confidence", 0.5),
+        })
+    _display_env_config_table(configs)
 
 
 def _extract_vault_updates(responses: dict[str, Any]) -> list[dict] | None:
