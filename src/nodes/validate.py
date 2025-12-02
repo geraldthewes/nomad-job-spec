@@ -113,7 +113,7 @@ def create_validate_node(
                 logger.warning(f"Pre-deployment warnings: {warnings}")
 
         if trace:
-            trace.update(output={
+            trace.end(output={
                 "passed": passed,
                 "error_count": len(errors),
                 "warning_count": len(warnings),

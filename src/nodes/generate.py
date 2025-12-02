@@ -259,7 +259,7 @@ def generate_spec_node(
         span.end(output={"is_valid": is_valid, "error": validation_error})
 
     if trace:
-        trace.update(output={
+        trace.end(output={
             "job_name": config.job_name,
             "hcl_valid": is_valid,
             "hcl_length": len(hcl_content),
@@ -697,7 +697,7 @@ Output ONLY a valid JSON object with the fixed job configuration.
         span.end(output={"is_valid": is_valid, "hcl_length": len(hcl_content)})
 
     if trace:
-        trace.update(output={
+        trace.end(output={
             "job_name": config.job_name,
             "iteration": iteration,
             "hcl_valid": is_valid,

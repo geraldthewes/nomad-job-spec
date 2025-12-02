@@ -459,7 +459,7 @@ def analyze_codebase(codebase_path: str) -> CodebaseAnalysis:
 
     # End the main trace
     if trace is not None:
-        trace.update(output=analysis.to_dict())
+        trace.end(output=analysis.to_dict())
 
     return analysis
 

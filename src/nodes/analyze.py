@@ -169,7 +169,7 @@ def analyze_codebase_node(
         span.end(output={"has_llm_analysis": llm_analysis is not None})
 
     if trace:
-        trace.update(output={
+        trace.end(output={
             "dockerfiles": final_analysis.get("dockerfiles_found", []),
             "language": final_analysis.get("dependencies", {}).get("language") if final_analysis.get("dependencies") else None,
             "env_vars_count": len(final_analysis.get("env_vars_required", [])),

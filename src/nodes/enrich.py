@@ -371,9 +371,9 @@ def create_enrich_node(
                 }
                 span.end(level="WARNING", status_message=str(e), output=nomad_info)
 
-        # Update the main trace with final output
+        # End the main trace with final output
         if trace is not None:
-            trace.update(output={
+            trace.end(output={
                 "env_var_configs_count": len(env_var_configs),
                 "vault_suggestions_count": len(vault_suggestions.get("suggestions", [])),
                 "consul_services_count": len(consul_services.get("available", [])),

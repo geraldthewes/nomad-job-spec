@@ -183,7 +183,8 @@ class ObservabilityManager:
         """Create a manual trace for custom instrumentation.
 
         In LangFuse v3+, traces are created implicitly via start_span().
-        This method creates a root span that acts as the trace container.
+        This method creates a root span that acts as the trace container,
+        and sets the trace name to match the span name.
 
         Args:
             name: Name for the trace.
@@ -205,6 +206,10 @@ class ObservabilityManager:
                 span_kwargs["metadata"] = kwargs["metadata"]
 
             raw_span = client.start_span(**span_kwargs)
+
+            # Set the trace name to match the span name for better visibility
+            raw_span.update_trace(name=name)
+
             return _SpanWrapper(raw_span)
         except Exception as e:
             logger.warning(f"Failed to create trace: {e}")
