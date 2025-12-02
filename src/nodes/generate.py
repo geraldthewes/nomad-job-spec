@@ -8,6 +8,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.language_models import BaseChatModel
 
+from src.observability import get_observability
 from src.tools.hcl import (
     JobConfig,
     PortConfig,
@@ -177,6 +178,12 @@ def generate_spec_node(
     Returns:
         Updated state with 'job_spec' (HCL string) and 'job_config' fields.
     """
+    obs = get_observability()
+    trace = obs.create_trace(
+        name="generate_node",
+        input={"prompt": state.get("prompt", "")[:200]},
+    )
+
     settings = get_settings()
 
     analysis = state.get("codebase_analysis", {})
@@ -194,50 +201,69 @@ def generate_spec_node(
     confirmed_env_configs = _extract_confirmed_env_configs(user_responses, env_var_configs)
 
     # Build context for LLM with enrichment data
-    context = _build_generation_context(
-        analysis,
-        user_responses,
-        prompt,
-        memories,
-        vault_suggestions=vault_suggestions,
-        fabio_validation=fabio_validation,
-        nomad_info=nomad_info,
-        env_var_configs=confirmed_env_configs,
-    )
+    with obs.span("build_generation_context", trace=trace) as span:
+        context = _build_generation_context(
+            analysis,
+            user_responses,
+            prompt,
+            memories,
+            vault_suggestions=vault_suggestions,
+            fabio_validation=fabio_validation,
+            nomad_info=nomad_info,
+            env_var_configs=confirmed_env_configs,
+        )
+        span.end(output={"context_length": len(context)})
 
     # Get the generation prompt
     generation_prompt = _get_generation_prompt()
 
     # Query LLM for configuration
-    messages = [
-        SystemMessage(content=generation_prompt),
-        HumanMessage(content=context),
-    ]
+    with obs.span("llm_generate", trace=trace, input={"prompt_length": len(generation_prompt)}) as span:
+        messages = [
+            SystemMessage(content=generation_prompt),
+            HumanMessage(content=context),
+        ]
 
-    response = llm.invoke(messages)
-    response_text = response.content if hasattr(response, "content") else str(response)
+        response = llm.invoke(messages)
+        response_text = response.content if hasattr(response, "content") else str(response)
+        span.end(output={"response_length": len(response_text)})
 
     # Parse LLM response into JobConfig
-    try:
-        config_dict = _parse_llm_response(response_text)
-        # Pass nomad_info and env_var_configs for proper configuration
-        config = _build_job_config(
-            config_dict,
-            analysis,
-            settings,
-            nomad_info,
-            env_var_configs=confirmed_env_configs,
-        )
-    except Exception as e:
-        # Fallback to basic config from analysis
-        config = _build_fallback_config(analysis, prompt, settings)
-        config_dict = {"error": str(e), "fallback": True}
+    config_dict = None
+    with obs.span("parse_llm_response", trace=trace) as span:
+        try:
+            config_dict = _parse_llm_response(response_text)
+            # Pass nomad_info and env_var_configs for proper configuration
+            config = _build_job_config(
+                config_dict,
+                analysis,
+                settings,
+                nomad_info,
+                env_var_configs=confirmed_env_configs,
+            )
+            span.end(output={"job_name": config.job_name, "service_type": str(config.service_type)})
+        except Exception as e:
+            # Fallback to basic config from analysis
+            config = _build_fallback_config(analysis, prompt, settings)
+            config_dict = {"error": str(e), "fallback": True}
+            span.end(level="WARNING", status_message=f"Using fallback config: {str(e)}")
 
     # Generate HCL
-    hcl_content = generate_hcl(config)
+    with obs.span("generate_hcl", trace=trace, input={"job_name": config.job_name}) as span:
+        hcl_content = generate_hcl(config)
+        span.end(output={"hcl_length": len(hcl_content)})
 
     # Validate HCL
-    is_valid, validation_error = validate_hcl(hcl_content, settings.nomad_addr)
+    with obs.span("validate_hcl", trace=trace) as span:
+        is_valid, validation_error = validate_hcl(hcl_content, settings.nomad_addr)
+        span.end(output={"is_valid": is_valid, "error": validation_error})
+
+    if trace:
+        trace.update(output={
+            "job_name": config.job_name,
+            "hcl_valid": is_valid,
+            "hcl_length": len(hcl_content),
+        })
 
     return {
         **state,
@@ -602,11 +628,22 @@ def regenerate_spec_with_fix(
     Returns:
         Updated state with new job_spec.
     """
+    obs = get_observability()
+    iteration = state.get("iteration_count", 0) + 1
+    trace = obs.create_trace(
+        name="fix_node",
+        input={
+            "iteration": iteration,
+            "error": state.get("deployment_error", "Unknown error")[:200],
+        },
+    )
+
     error = state.get("deployment_error", "Unknown error")
     current_spec = state.get("job_spec", "")
     memories = state.get("relevant_memories", [])
 
-    fix_prompt = f"""The previous job specification failed to deploy with the following error:
+    with obs.span("build_fix_prompt", trace=trace) as span:
+        fix_prompt = f"""The previous job specification failed to deploy with the following error:
 
 ERROR: {error}
 
@@ -626,30 +663,45 @@ Common fixes:
 
 Output ONLY a valid JSON object with the fixed job configuration.
 """
+        span.end(output={"prompt_length": len(fix_prompt), "memories_count": len(memories)})
 
     # Get the fix system prompt
     fix_system_prompt = _get_fix_prompt()
 
-    messages = [
-        SystemMessage(content=fix_system_prompt),
-        HumanMessage(content=fix_prompt),
-    ]
+    with obs.span("llm_fix", trace=trace) as span:
+        messages = [
+            SystemMessage(content=fix_system_prompt),
+            HumanMessage(content=fix_prompt),
+        ]
 
-    response = llm.invoke(messages)
-    response_text = response.content if hasattr(response, "content") else str(response)
+        response = llm.invoke(messages)
+        response_text = response.content if hasattr(response, "content") else str(response)
+        span.end(output={"response_length": len(response_text)})
 
     settings = get_settings()
 
-    try:
-        config_dict = _parse_llm_response(response_text)
-        config = _build_job_config(config_dict, state.get("codebase_analysis", {}), settings)
-    except Exception:
-        # If fix fails, try incrementing resources
-        current_config = state.get("job_config", {})
-        config = _increment_resources(current_config, error, settings)
+    with obs.span("parse_and_build_config", trace=trace) as span:
+        try:
+            config_dict = _parse_llm_response(response_text)
+            config = _build_job_config(config_dict, state.get("codebase_analysis", {}), settings)
+            span.end(output={"job_name": config.job_name, "fix_method": "llm"})
+        except Exception as e:
+            # If fix fails, try incrementing resources
+            current_config = state.get("job_config", {})
+            config = _increment_resources(current_config, error, settings)
+            span.end(level="WARNING", status_message=f"Using resource increment: {str(e)}", output={"fix_method": "increment"})
 
-    hcl_content = generate_hcl(config)
-    is_valid, validation_error = validate_hcl(hcl_content, settings.nomad_addr)
+    with obs.span("generate_and_validate_hcl", trace=trace) as span:
+        hcl_content = generate_hcl(config)
+        is_valid, validation_error = validate_hcl(hcl_content, settings.nomad_addr)
+        span.end(output={"is_valid": is_valid, "hcl_length": len(hcl_content)})
+
+    if trace:
+        trace.update(output={
+            "job_name": config.job_name,
+            "iteration": iteration,
+            "hcl_valid": is_valid,
+        })
 
     return {
         **state,
@@ -658,7 +710,7 @@ Output ONLY a valid JSON object with the fixed job configuration.
         "job_name": config.job_name,
         "hcl_valid": is_valid,
         "validation_error": validation_error,
-        "iteration_count": state.get("iteration_count", 0) + 1,
+        "iteration_count": iteration,
     }
 
 

@@ -1,6 +1,7 @@
 """Codebase analysis tools for extracting deployment-relevant information."""
 
 import json
+import logging
 import os
 import re
 import tempfile
@@ -9,6 +10,10 @@ from pathlib import Path
 from typing import Any
 
 import git
+
+from src.observability import get_observability
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -357,9 +362,17 @@ def analyze_codebase(codebase_path: str) -> CodebaseAnalysis:
     Returns:
         CodebaseAnalysis with all extracted information.
     """
+    obs = get_observability()
+    trace = obs.create_trace(
+        name="analyze_codebase",
+        input={"codebase_path": codebase_path},
+    )
+
     # Handle git URLs
     if codebase_path.startswith(("http://", "https://", "git@")):
-        codebase_path = clone_repository(codebase_path)
+        with obs.span("clone_repository", trace=trace, input={"url": codebase_path}) as span:
+            codebase_path = clone_repository(codebase_path)
+            span.end(output={"cloned_path": codebase_path})
 
     path = Path(codebase_path)
     if not path.exists():
@@ -369,59 +382,85 @@ def analyze_codebase(codebase_path: str) -> CodebaseAnalysis:
     files_analyzed = []
 
     # Find all Dockerfiles in the repository
-    dockerfiles_found = []
-    # Use glob to find all Dockerfile variants
-    for dockerfile_path in path.glob("**/Dockerfile*"):
-        # Skip directories, backup files, and documentation
-        if dockerfile_path.is_dir():
-            continue
-        name = dockerfile_path.name.lower()
-        if name.endswith((".md", ".txt", ".bak", ".orig", ".swp", "~")):
-            continue
-        # Skip files in common non-source directories
-        rel_path = str(dockerfile_path.relative_to(path))
-        if any(part in rel_path.split("/") for part in ["node_modules", ".git", "vendor", "__pycache__"]):
-            continue
-        dockerfiles_found.append(rel_path)
+    with obs.span("find_dockerfiles", trace=trace, input={"path": str(path)}) as span:
+        dockerfiles_found = []
+        # Use glob to find all Dockerfile variants
+        for dockerfile_path in path.glob("**/Dockerfile*"):
+            # Skip directories, backup files, and documentation
+            if dockerfile_path.is_dir():
+                continue
+            name = dockerfile_path.name.lower()
+            if name.endswith((".md", ".txt", ".bak", ".orig", ".swp", "~")):
+                continue
+            # Skip files in common non-source directories
+            rel_path = str(dockerfile_path.relative_to(path))
+            if any(part in rel_path.split("/") for part in ["node_modules", ".git", "vendor", "__pycache__"]):
+                continue
+            dockerfiles_found.append(rel_path)
 
-    # Sort: prefer root Dockerfile first, then alphabetically
-    def dockerfile_sort_key(p: str) -> tuple:
-        depth = p.count("/")
-        is_plain_dockerfile = p.lower() in ("dockerfile", "dockerfile")
-        return (depth, not is_plain_dockerfile, p.lower())
+        # Sort: prefer root Dockerfile first, then alphabetically
+        def dockerfile_sort_key(p: str) -> tuple:
+            depth = p.count("/")
+            is_plain_dockerfile = p.lower() in ("dockerfile", "dockerfile")
+            return (depth, not is_plain_dockerfile, p.lower())
 
-    dockerfiles_found.sort(key=dockerfile_sort_key)
-    analysis.dockerfiles_found = dockerfiles_found
+        dockerfiles_found.sort(key=dockerfile_sort_key)
+        analysis.dockerfiles_found = dockerfiles_found
+        span.end(output={"dockerfiles_found": dockerfiles_found, "count": len(dockerfiles_found)})
 
     # Parse the primary (first) Dockerfile for analysis
     if dockerfiles_found:
         primary_dockerfile = path / dockerfiles_found[0]
-        try:
-            analysis.dockerfile = parse_dockerfile(str(primary_dockerfile))
-            files_analyzed.append(dockerfiles_found[0])
-        except Exception as e:
-            analysis.errors.append(f"Error parsing Dockerfile: {e}")
+        with obs.span("parse_dockerfile", trace=trace, input={"dockerfile": dockerfiles_found[0]}) as span:
+            try:
+                analysis.dockerfile = parse_dockerfile(str(primary_dockerfile))
+                files_analyzed.append(dockerfiles_found[0])
+                span.end(output={
+                    "base_image": analysis.dockerfile.base_image,
+                    "exposed_ports": analysis.dockerfile.exposed_ports,
+                    "cmd": analysis.dockerfile.cmd,
+                })
+            except Exception as e:
+                analysis.errors.append(f"Error parsing Dockerfile: {e}")
+                span.end(level="ERROR", status_message=str(e))
 
     # Detect language and dependencies
-    try:
-        analysis.dependencies = detect_language_and_deps(str(path))
-        # Track which files were analyzed
-        for dep_file in ["requirements.txt", "pyproject.toml", "package.json", "go.mod", "Cargo.toml"]:
-            if (path / dep_file).exists():
-                files_analyzed.append(dep_file)
-    except Exception as e:
-        analysis.errors.append(f"Error detecting dependencies: {e}")
+    with obs.span("detect_language_and_deps", trace=trace, input={"path": str(path)}) as span:
+        try:
+            analysis.dependencies = detect_language_and_deps(str(path))
+            # Track which files were analyzed
+            for dep_file in ["requirements.txt", "pyproject.toml", "package.json", "go.mod", "Cargo.toml"]:
+                if (path / dep_file).exists():
+                    files_analyzed.append(dep_file)
+            span.end(output={
+                "language": analysis.dependencies.language if analysis.dependencies else None,
+                "package_manager": analysis.dependencies.package_manager if analysis.dependencies else None,
+                "dep_count": len(analysis.dependencies.dependencies) if analysis.dependencies else 0,
+            })
+        except Exception as e:
+            analysis.errors.append(f"Error detecting dependencies: {e}")
+            span.end(level="ERROR", status_message=str(e))
 
     # Detect environment variables
-    try:
-        analysis.env_vars_required = detect_env_vars(str(path))
-    except Exception as e:
-        analysis.errors.append(f"Error detecting env vars: {e}")
+    with obs.span("detect_env_vars", trace=trace, input={"path": str(path)}) as span:
+        try:
+            analysis.env_vars_required = detect_env_vars(str(path))
+            span.end(output={"env_vars": analysis.env_vars_required, "count": len(analysis.env_vars_required)})
+        except Exception as e:
+            analysis.errors.append(f"Error detecting env vars: {e}")
+            span.end(level="ERROR", status_message=str(e))
 
     # Suggest resources
-    analysis.suggested_resources = suggest_resources(analysis.dockerfile, analysis.dependencies)
+    with obs.span("suggest_resources", trace=trace) as span:
+        analysis.suggested_resources = suggest_resources(analysis.dockerfile, analysis.dependencies)
+        span.end(output=analysis.suggested_resources)
 
     analysis.files_analyzed = files_analyzed
+
+    # End the main trace
+    if trace is not None:
+        trace.update(output=analysis.to_dict())
+
     return analysis
 
 

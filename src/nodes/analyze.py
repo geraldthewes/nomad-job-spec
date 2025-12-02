@@ -7,6 +7,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.language_models import BaseChatModel
 
+from src.observability import get_observability
 from src.tools.codebase import (
     CodebaseAnalysis,
     analyze_codebase as analyze_codebase_tool,
@@ -114,33 +115,66 @@ def analyze_codebase_node(
     Returns:
         Updated state with 'codebase_analysis' field.
     """
+    obs = get_observability()
+    trace = obs.create_trace(
+        name="analyze_node",
+        input={"codebase_path": state.get("codebase_path")},
+    )
+
     codebase_path = state.get("codebase_path")
     if not codebase_path:
+        if trace:
+            trace.update(level="ERROR", status_message="No codebase path provided")
         return {
             **state,
             "codebase_analysis": {"error": "No codebase path provided"},
         }
 
-    # Step 1: Static analysis
-    try:
-        static_analysis: CodebaseAnalysis = analyze_codebase_tool(codebase_path)
-    except Exception as e:
-        return {
-            **state,
-            "codebase_analysis": {"error": f"Static analysis failed: {str(e)}"},
-        }
+    # Step 1: Static analysis (already instrumented in analyze_codebase_tool)
+    with obs.span("static_analysis", trace=trace, input={"path": codebase_path}) as span:
+        try:
+            static_analysis: CodebaseAnalysis = analyze_codebase_tool(codebase_path)
+            span.end(output={
+                "dockerfiles_found": len(static_analysis.dockerfiles_found),
+                "language": static_analysis.dependencies.language if static_analysis.dependencies else None,
+                "env_vars_count": len(static_analysis.env_vars_required),
+            })
+        except Exception as e:
+            span.end(level="ERROR", status_message=str(e))
+            if trace:
+                trace.update(level="ERROR", status_message=f"Static analysis failed: {str(e)}")
+            return {
+                **state,
+                "codebase_analysis": {"error": f"Static analysis failed: {str(e)}"},
+            }
 
     # Step 2: LLM-enhanced analysis (if LLM provided)
     llm_analysis = None
     if llm:
-        try:
-            llm_analysis = _perform_llm_analysis(codebase_path, static_analysis, llm)
-        except Exception as e:
-            # LLM analysis is optional - continue with static analysis only
-            static_analysis.errors.append(f"LLM analysis failed: {str(e)}")
+        with obs.span("llm_analysis", trace=trace) as span:
+            try:
+                llm_analysis = _perform_llm_analysis(codebase_path, static_analysis, llm)
+                span.end(output={
+                    "has_summary": "summary" in llm_analysis if llm_analysis else False,
+                    "has_resources": "resources" in llm_analysis if llm_analysis else False,
+                })
+            except Exception as e:
+                # LLM analysis is optional - continue with static analysis only
+                static_analysis.errors.append(f"LLM analysis failed: {str(e)}")
+                span.end(level="WARNING", status_message=str(e))
 
     # Merge analyses
-    final_analysis = _merge_analyses(static_analysis, llm_analysis)
+    with obs.span("merge_analyses", trace=trace) as span:
+        final_analysis = _merge_analyses(static_analysis, llm_analysis)
+        span.end(output={"has_llm_analysis": llm_analysis is not None})
+
+    if trace:
+        trace.update(output={
+            "dockerfiles": final_analysis.get("dockerfiles_found", []),
+            "language": final_analysis.get("dependencies", {}).get("language") if final_analysis.get("dependencies") else None,
+            "env_vars_count": len(final_analysis.get("env_vars_required", [])),
+            "errors_count": len(final_analysis.get("errors", [])),
+        })
 
     return {
         **state,

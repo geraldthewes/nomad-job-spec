@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from config.settings import Settings, get_settings
+from src.observability import get_observability
 from src.tools.vault import get_vault_client
 from src.tools.fabio import get_fabio_client, FabioRouteConflictError
 
@@ -53,6 +54,12 @@ def create_validate_node(
         - pre_deploy_validation: ValidationResult details
         - deployment_status: Set to 'blocked' if validation fails
         """
+        obs = get_observability()
+        trace = obs.create_trace(
+            name="validate_node",
+            input={"job_name": state.get("job_name", "unknown")},
+        )
+
         errors: list[str] = []
         warnings: list[str] = []
 
@@ -61,18 +68,24 @@ def create_validate_node(
         vault_suggestions = state.get("vault_suggestions", {})
 
         # 1. Validate Fabio routes (STRICT MODE)
-        fabio_errors = _validate_fabio_routes(job_config, fabio_validation)
-        errors.extend(fabio_errors)
+        with obs.span("validate_fabio_routes", trace=trace) as span:
+            fabio_errors = _validate_fabio_routes(job_config, fabio_validation)
+            errors.extend(fabio_errors)
+            span.end(output={"errors": fabio_errors, "count": len(fabio_errors)})
 
         # 2. Validate Vault paths
-        vault_warnings = _validate_vault_paths(job_config, vault_suggestions)
-        warnings.extend(vault_warnings)
+        with obs.span("validate_vault_paths", trace=trace) as span:
+            vault_warnings = _validate_vault_paths(job_config, vault_suggestions)
+            warnings.extend(vault_warnings)
+            span.end(output={"warnings": vault_warnings, "count": len(vault_warnings)})
 
         # 3. Validate HCL syntax (if available)
-        hcl_valid = state.get("hcl_valid", True)
-        validation_error = state.get("validation_error")
-        if not hcl_valid and validation_error:
-            errors.append(f"HCL validation failed: {validation_error}")
+        with obs.span("check_hcl_syntax", trace=trace) as span:
+            hcl_valid = state.get("hcl_valid", True)
+            validation_error = state.get("validation_error")
+            if not hcl_valid and validation_error:
+                errors.append(f"HCL validation failed: {validation_error}")
+            span.end(output={"hcl_valid": hcl_valid, "error": validation_error})
 
         # Determine overall result
         passed = len(errors) == 0
@@ -98,6 +111,13 @@ def create_validate_node(
         else:
             if warnings:
                 logger.warning(f"Pre-deployment warnings: {warnings}")
+
+        if trace:
+            trace.update(output={
+                "passed": passed,
+                "error_count": len(errors),
+                "warning_count": len(warnings),
+            })
 
         return new_state
 

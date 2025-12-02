@@ -1,7 +1,9 @@
 """Observability with LangFuse tracing and prompt management."""
 
+import functools
 import logging
-from typing import TYPE_CHECKING, Any
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, Callable, TypeVar
 
 from config.settings import Settings, get_settings
 
@@ -10,6 +12,9 @@ if TYPE_CHECKING:
     from langfuse.langchain import CallbackHandler
 
 logger = logging.getLogger(__name__)
+
+# Type variable for generic function decoration
+F = TypeVar("F", bound=Callable[..., Any])
 
 
 class ObservabilityManager:
@@ -194,6 +199,117 @@ class ObservabilityManager:
             logger.warning(f"Failed to create trace: {e}")
             return None
 
+    @contextmanager
+    def span(
+        self,
+        name: str,
+        trace: Any = None,
+        parent: Any = None,
+        input: Any = None,
+        metadata: dict[str, Any] | None = None,
+    ):
+        """Context manager for creating a span within a trace.
+
+        Usage:
+            with obs.span("parse_dockerfile", input={"path": dockerfile_path}) as span:
+                result = parse_dockerfile(dockerfile_path)
+                span.end(output=result)
+
+        Args:
+            name: Name for the span (e.g., "parse_dockerfile", "query_vault").
+            trace: Parent trace object. If None, creates a new trace.
+            parent: Parent span for nesting.
+            input: Input data to record with the span.
+            metadata: Additional metadata for the span.
+
+        Yields:
+            Span object (or a no-op wrapper if LangFuse is unavailable).
+        """
+        client = self.get_client()
+
+        if client is None:
+            # Return a no-op span wrapper
+            yield _NoOpSpan()
+            return
+
+        try:
+            # Create trace if not provided
+            if trace is None and parent is None:
+                trace = client.trace(name=f"{name}-trace")
+
+            # Create the span
+            span_kwargs: dict[str, Any] = {"name": name}
+            if input is not None:
+                span_kwargs["input"] = input
+            if metadata:
+                span_kwargs["metadata"] = metadata
+
+            if parent is not None:
+                span_obj = parent.span(**span_kwargs)
+            elif trace is not None:
+                span_obj = trace.span(**span_kwargs)
+            else:
+                # Fallback: create as a trace
+                span_obj = client.trace(**span_kwargs)
+
+            try:
+                yield span_obj
+            except Exception as e:
+                # Record error in span
+                span_obj.end(
+                    level="ERROR",
+                    status_message=str(e),
+                )
+                raise
+            else:
+                # Span ended successfully (output should be set by caller via span.end())
+                pass
+
+        except Exception as e:
+            logger.warning(f"Failed to create span '{name}': {e}")
+            yield _NoOpSpan()
+
+    def traced(
+        self,
+        name: str | None = None,
+        capture_input: bool = True,
+        capture_output: bool = True,
+    ) -> Callable[[F], F]:
+        """Decorator for tracing function calls.
+
+        Usage:
+            @obs.traced("parse_dockerfile")
+            def parse_dockerfile(path: str) -> DockerfileInfo:
+                ...
+
+        Args:
+            name: Span name. Defaults to function name.
+            capture_input: Whether to capture function arguments.
+            capture_output: Whether to capture return value.
+
+        Returns:
+            Decorated function.
+        """
+        def decorator(func: F) -> F:
+            span_name = name or func.__name__
+
+            @functools.wraps(func)
+            def wrapper(*args: Any, **kwargs: Any) -> Any:
+                # Build input dict if capturing
+                input_data = None
+                if capture_input:
+                    input_data = {"args": args, "kwargs": kwargs}
+
+                with self.span(span_name, input=input_data) as span:
+                    result = func(*args, **kwargs)
+                    if capture_output and hasattr(span, "end"):
+                        span.end(output=result)
+                    return result
+
+            return wrapper  # type: ignore
+
+        return decorator
+
     def flush(self) -> None:
         """Flush pending traces to LangFuse.
 
@@ -219,6 +335,22 @@ class ObservabilityManager:
             finally:
                 self._client = None
                 self._available = False
+
+
+class _NoOpSpan:
+    """No-op span for when LangFuse is unavailable."""
+
+    def end(self, **kwargs: Any) -> None:
+        """No-op end method."""
+        pass
+
+    def span(self, **kwargs: Any) -> "_NoOpSpan":
+        """Return another no-op span for nesting."""
+        return _NoOpSpan()
+
+    def update(self, **kwargs: Any) -> None:
+        """No-op update method."""
+        pass
 
 
 # Module-level singleton

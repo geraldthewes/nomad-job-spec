@@ -11,6 +11,7 @@ import logging
 from typing import Any
 
 from config.settings import Settings, get_settings
+from src.observability import get_observability
 from src.tools.vault import (
     VaultClient,
     VaultConventions,
@@ -109,6 +110,12 @@ def create_enrich_node(
         Note: This node is designed to be resilient - if infrastructure
         services are unavailable, it will continue with empty/default values.
         """
+        obs = get_observability()
+        trace = obs.create_trace(
+            name="enrich_node",
+            input={"app_name": _extract_app_name(state)},
+        )
+
         analysis = state.get("codebase_analysis", {})
         app_name = _extract_app_name(state)
 
@@ -119,42 +126,51 @@ def create_enrich_node(
         fabio = None
         infra_issues: list[dict[str, str]] = []
 
-        try:
-            vault = get_vault_client()
-        except Exception as e:
-            error_str = str(e)
-            if "connection refused" in error_str.lower():
-                msg = "Vault connection refused - check if Vault is running"
-            elif "timeout" in error_str.lower():
-                msg = "Vault connection timeout - check network"
-            else:
-                msg = f"Vault initialization failed: {error_str[:100]}"
-            logger.warning(msg)
-            infra_issues.append({"service": "Vault", "error": msg})
+        with obs.span("init_vault_client", trace=trace) as span:
+            try:
+                vault = get_vault_client()
+                span.end(output={"status": "connected"})
+            except Exception as e:
+                error_str = str(e)
+                if "connection refused" in error_str.lower():
+                    msg = "Vault connection refused - check if Vault is running"
+                elif "timeout" in error_str.lower():
+                    msg = "Vault connection timeout - check network"
+                else:
+                    msg = f"Vault initialization failed: {error_str[:100]}"
+                logger.warning(msg)
+                infra_issues.append({"service": "Vault", "error": msg})
+                span.end(level="WARNING", status_message=msg)
 
-        try:
-            consul = get_consul_client()
-        except Exception as e:
-            error_str = str(e)
-            if "connection refused" in error_str.lower():
-                msg = "Consul connection refused - check if Consul is running"
-            elif "invalid" in error_str.lower():
-                msg = f"Consul address configuration issue: {error_str[:100]}"
-            else:
-                msg = f"Consul initialization failed: {error_str[:100]}"
-            logger.warning(msg)
-            infra_issues.append({"service": "Consul", "error": msg})
+        with obs.span("init_consul_client", trace=trace) as span:
+            try:
+                consul = get_consul_client()
+                span.end(output={"status": "connected"})
+            except Exception as e:
+                error_str = str(e)
+                if "connection refused" in error_str.lower():
+                    msg = "Consul connection refused - check if Consul is running"
+                elif "invalid" in error_str.lower():
+                    msg = f"Consul address configuration issue: {error_str[:100]}"
+                else:
+                    msg = f"Consul initialization failed: {error_str[:100]}"
+                logger.warning(msg)
+                infra_issues.append({"service": "Consul", "error": msg})
+                span.end(level="WARNING", status_message=msg)
 
-        try:
-            fabio = get_fabio_client()
-        except Exception as e:
-            error_str = str(e)
-            if "connection refused" in error_str.lower():
-                msg = "Fabio connection refused - check if Fabio is running"
-            else:
-                msg = f"Fabio initialization failed: {error_str[:100]}"
-            logger.warning(msg)
-            infra_issues.append({"service": "Fabio", "error": msg})
+        with obs.span("init_fabio_client", trace=trace) as span:
+            try:
+                fabio = get_fabio_client()
+                span.end(output={"status": "connected"})
+            except Exception as e:
+                error_str = str(e)
+                if "connection refused" in error_str.lower():
+                    msg = "Fabio connection refused - check if Fabio is running"
+                else:
+                    msg = f"Fabio initialization failed: {error_str[:100]}"
+                logger.warning(msg)
+                infra_issues.append({"service": "Fabio", "error": msg})
+                span.end(level="WARNING", status_message=msg)
 
         # Initialize enrichment data
         vault_suggestions: dict[str, Any] = {"suggestions": [], "error": None}
@@ -164,153 +180,209 @@ def create_enrich_node(
         nomad_info: dict[str, Any] = {}
 
         # 1. Load conventions from Consul (or use defaults)
-        if consul is None:
-            consul_conventions = _default_conventions()
-            logger.info("Using default conventions (Consul unavailable)")
-        else:
-            try:
-                consul_conventions = consul.get_conventions()
-                logger.info("Loaded conventions from Consul KV")
-            except Exception as e:
-                logger.warning(f"Failed to load conventions from Consul: {e}")
+        with obs.span("load_conventions", trace=trace, input={"source": "consul" if consul else "defaults"}) as span:
+            if consul is None:
                 consul_conventions = _default_conventions()
+                logger.info("Using default conventions (Consul unavailable)")
+                span.end(output={"source": "defaults"})
+            else:
+                try:
+                    consul_conventions = consul.get_conventions()
+                    logger.info("Loaded conventions from Consul KV")
+                    span.end(output={"source": "consul", "keys": list(consul_conventions.keys())})
+                except Exception as e:
+                    logger.warning(f"Failed to load conventions from Consul: {e}")
+                    consul_conventions = _default_conventions()
+                    span.end(level="WARNING", status_message=str(e), output={"source": "defaults_fallback"})
 
         # 2. Update Vault conventions if found and vault client available
         if vault is not None:
-            vault_conv = consul_conventions.get("vault", {})
-            if vault_conv:
-                try:
-                    vault.set_conventions(
-                        VaultConventions(
-                            path_patterns=vault_conv.get("path_patterns", {}),
-                            env_var_mappings=vault_conv.get("env_var_mappings", {}),
-                            default_policy_pattern=vault_conv.get(
-                                "default_policy_pattern", "{app_name}-policy"
-                            ),
+            with obs.span("set_vault_conventions", trace=trace) as span:
+                vault_conv = consul_conventions.get("vault", {})
+                if vault_conv:
+                    try:
+                        vault.set_conventions(
+                            VaultConventions(
+                                path_patterns=vault_conv.get("path_patterns", {}),
+                                env_var_mappings=vault_conv.get("env_var_mappings", {}),
+                                default_policy_pattern=vault_conv.get(
+                                    "default_policy_pattern", "{app_name}-policy"
+                                ),
+                            )
                         )
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to set Vault conventions: {e}")
+                        span.end(output={"status": "set", "patterns": list(vault_conv.get("path_patterns", {}).keys())})
+                    except Exception as e:
+                        logger.warning(f"Failed to set Vault conventions: {e}")
+                        span.end(level="WARNING", status_message=str(e))
+                else:
+                    span.end(output={"status": "no_conventions"})
 
         # 3. Generate multi-source env var configurations
         env_vars = analysis.get("env_vars_required", [])
         env_var_configs: list[dict] = []
 
-        if env_vars:
-            try:
-                # Use new multi-source suggestion logic
-                configs = suggest_env_configs(env_vars, app_name, vault)
-                env_var_configs = [cfg.to_dict() for cfg in configs]
-                logger.info(
-                    f"Generated {len(env_var_configs)} env var configs "
-                    f"(fixed: {sum(1 for c in configs if c.source == 'fixed')}, "
-                    f"consul: {sum(1 for c in configs if c.source == 'consul')}, "
-                    f"vault: {sum(1 for c in configs if c.source == 'vault')})"
-                )
-            except Exception as e:
-                logger.warning(f"Failed to suggest env var configs: {e}")
+        with obs.span("suggest_env_configs", trace=trace, input={"env_vars": env_vars, "count": len(env_vars)}) as span:
+            if env_vars:
+                try:
+                    # Use new multi-source suggestion logic
+                    configs = suggest_env_configs(env_vars, app_name, vault)
+                    env_var_configs = [cfg.to_dict() for cfg in configs]
+                    fixed_count = sum(1 for c in configs if c.source == "fixed")
+                    consul_count = sum(1 for c in configs if c.source == "consul")
+                    vault_count = sum(1 for c in configs if c.source == "vault")
+                    logger.info(
+                        f"Generated {len(env_var_configs)} env var configs "
+                        f"(fixed: {fixed_count}, consul: {consul_count}, vault: {vault_count})"
+                    )
+                    span.end(output={
+                        "total": len(env_var_configs),
+                        "fixed": fixed_count,
+                        "consul": consul_count,
+                        "vault": vault_count,
+                    })
+                except Exception as e:
+                    logger.warning(f"Failed to suggest env var configs: {e}")
+                    span.end(level="WARNING", status_message=str(e))
+            else:
+                span.end(output={"total": 0, "reason": "no_env_vars"})
 
         # Also maintain legacy vault_suggestions for backward compatibility
-        if env_vars and vault is not None:
-            try:
-                suggestions = vault.suggest_mappings(env_vars, app_name)
-                vault_suggestions["suggestions"] = [
-                    {
-                        "env_var": s.env_var,
-                        "suggested_path": s.suggested_path,
-                        "key": s.key,
-                        "confidence": s.confidence,
-                        "vault_reference": f"{s.suggested_path}#{s.key}",
-                    }
-                    for s in suggestions
-                ]
-                logger.info(f"Generated {len(suggestions)} Vault path suggestions")
-            except Exception as e:
-                logger.warning(f"Failed to suggest Vault mappings: {e}")
-                vault_suggestions["error"] = str(e)
+        with obs.span("suggest_vault_mappings", trace=trace, input={"env_vars_count": len(env_vars)}) as span:
+            if env_vars and vault is not None:
+                try:
+                    suggestions = vault.suggest_mappings(env_vars, app_name)
+                    vault_suggestions["suggestions"] = [
+                        {
+                            "env_var": s.env_var,
+                            "suggested_path": s.suggested_path,
+                            "key": s.key,
+                            "confidence": s.confidence,
+                            "vault_reference": f"{s.suggested_path}#{s.key}",
+                        }
+                        for s in suggestions
+                    ]
+                    logger.info(f"Generated {len(suggestions)} Vault path suggestions")
+                    span.end(output={"suggestions_count": len(suggestions)})
+                except Exception as e:
+                    logger.warning(f"Failed to suggest Vault mappings: {e}")
+                    vault_suggestions["error"] = str(e)
+                    span.end(level="WARNING", status_message=str(e))
+            else:
+                span.end(output={"skipped": True, "reason": "no_env_vars_or_vault"})
 
         # 4. Check Consul for service dependencies
-        if consul is not None:
-            try:
-                services = consul.list_services()
-                consul_services["available"] = list(services.keys())
+        with obs.span("query_consul_services", trace=trace) as span:
+            if consul is not None:
+                try:
+                    services = consul.list_services()
+                    consul_services["available"] = list(services.keys())
 
-                # Identify potential dependencies from analysis
-                dependencies = _identify_dependencies(analysis)
-                for dep in dependencies:
-                    health = consul.get_service_health(dep)
-                    healthy = [s for s in health if s.health_status == "passing"]
-                    consul_services["dependencies"].append({
-                        "service": dep,
-                        "available": len(healthy) > 0,
-                        "healthy_instances": len(healthy),
-                        "consul_dns": f"{dep}.service.consul",
+                    # Identify potential dependencies from analysis
+                    dependencies = _identify_dependencies(analysis)
+                    for dep in dependencies:
+                        health = consul.get_service_health(dep)
+                        healthy = [s for s in health if s.health_status == "passing"]
+                        consul_services["dependencies"].append({
+                            "service": dep,
+                            "available": len(healthy) > 0,
+                            "healthy_instances": len(healthy),
+                            "consul_dns": f"{dep}.service.consul",
+                        })
+                    span.end(output={
+                        "services_available": len(consul_services["available"]),
+                        "dependencies_checked": len(dependencies),
                     })
-            except Exception as e:
-                logger.warning(f"Failed to query Consul services: {e}")
+                except Exception as e:
+                    logger.warning(f"Failed to query Consul services: {e}")
+                    span.end(level="WARNING", status_message=str(e))
+            else:
+                span.end(output={"skipped": True, "reason": "consul_unavailable"})
 
         # 5. Check Fabio route availability
-        if fabio is not None:
-            try:
+        with obs.span("validate_fabio_routes", trace=trace, input={"app_name": app_name}) as span:
+            if fabio is not None:
+                try:
+                    fabio_conventions = consul_conventions.get("fabio", {})
+                    suffix = fabio_conventions.get("hostname_suffix", ".cluster")
+                    reserved = fabio_conventions.get("reserved_hostnames", [])
+
+                    # Suggest hostname
+                    suggested = fabio.suggest_hostname(app_name, suffix)
+                    fabio_validation["suggested_hostname"] = suggested
+                    fabio_validation["fabio_tag"] = f"urlprefix-{suggested}:9999/"
+
+                    # Check for conflicts
+                    if suggested not in reserved:
+                        conflict = fabio.check_route_conflict(hostname=suggested)
+                        if conflict:
+                            fabio_validation["conflicts"].append({
+                                "type": conflict.conflict_type,
+                                "severity": conflict.severity,
+                                "existing_service": conflict.existing_route.service,
+                                "existing_route": conflict.existing_route.src,
+                            })
+                    else:
+                        fabio_validation["conflicts"].append({
+                            "type": "reserved",
+                            "severity": "error",
+                            "message": f"Hostname '{suggested}' is reserved",
+                        })
+                    span.end(output={
+                        "suggested_hostname": suggested,
+                        "conflicts_count": len(fabio_validation["conflicts"]),
+                    })
+                except Exception as e:
+                    logger.warning(f"Failed to validate Fabio routes: {e}")
+                    fabio_validation["error"] = str(e)
+                    span.end(level="WARNING", status_message=str(e))
+            else:
+                # Provide default hostname suggestion even without Fabio
                 fabio_conventions = consul_conventions.get("fabio", {})
                 suffix = fabio_conventions.get("hostname_suffix", ".cluster")
-                reserved = fabio_conventions.get("reserved_hostnames", [])
-
-                # Suggest hostname
-                suggested = fabio.suggest_hostname(app_name, suffix)
-                fabio_validation["suggested_hostname"] = suggested
-                fabio_validation["fabio_tag"] = f"urlprefix-{suggested}:9999/"
-
-                # Check for conflicts
-                if suggested not in reserved:
-                    conflict = fabio.check_route_conflict(hostname=suggested)
-                    if conflict:
-                        fabio_validation["conflicts"].append({
-                            "type": conflict.conflict_type,
-                            "severity": conflict.severity,
-                            "existing_service": conflict.existing_route.service,
-                            "existing_route": conflict.existing_route.src,
-                        })
-                else:
-                    fabio_validation["conflicts"].append({
-                        "type": "reserved",
-                        "severity": "error",
-                        "message": f"Hostname '{suggested}' is reserved",
-                    })
-            except Exception as e:
-                logger.warning(f"Failed to validate Fabio routes: {e}")
-                fabio_validation["error"] = str(e)
-        else:
-            # Provide default hostname suggestion even without Fabio
-            fabio_conventions = consul_conventions.get("fabio", {})
-            suffix = fabio_conventions.get("hostname_suffix", ".cluster")
-            fabio_validation["suggested_hostname"] = f"{app_name}{suffix}"
-            fabio_validation["fabio_tag"] = f"urlprefix-{app_name}{suffix}:9999/"
+                fabio_validation["suggested_hostname"] = f"{app_name}{suffix}"
+                fabio_validation["fabio_tag"] = f"urlprefix-{app_name}{suffix}:9999/"
+                span.end(output={
+                    "suggested_hostname": fabio_validation["suggested_hostname"],
+                    "source": "default",
+                })
 
         # 6. Get Nomad version info
-        try:
-            version = get_cached_nomad_version(
-                addr=settings.nomad_addr,
-                token=settings.nomad_token,
-            )
-            nomad_info = {
-                "version": str(version),
-                "supports_native_vault_env": version.supports_native_vault_env(),
-                "supports_csi_volumes": version.supports_csi_volumes(),
-                "recommended_vault_format": (
-                    "env_stanza" if version.supports_native_vault_env() else "template"
-                ),
-            }
-        except Exception as e:
-            logger.warning(f"Failed to get Nomad version: {e}")
-            nomad_info = {
-                "version": "unknown",
-                "supports_native_vault_env": True,  # Assume modern Nomad
-                "recommended_vault_format": "env_stanza",
-            }
+        with obs.span("get_nomad_version", trace=trace) as span:
+            try:
+                version = get_cached_nomad_version(
+                    addr=settings.nomad_addr,
+                    token=settings.nomad_token,
+                )
+                nomad_info = {
+                    "version": str(version),
+                    "supports_native_vault_env": version.supports_native_vault_env(),
+                    "supports_csi_volumes": version.supports_csi_volumes(),
+                    "recommended_vault_format": (
+                        "env_stanza" if version.supports_native_vault_env() else "template"
+                    ),
+                }
+                span.end(output=nomad_info)
+            except Exception as e:
+                logger.warning(f"Failed to get Nomad version: {e}")
+                nomad_info = {
+                    "version": "unknown",
+                    "supports_native_vault_env": True,  # Assume modern Nomad
+                    "recommended_vault_format": "env_stanza",
+                }
+                span.end(level="WARNING", status_message=str(e), output=nomad_info)
+
+        # Update the main trace with final output
+        if trace is not None:
+            trace.update(output={
+                "env_var_configs_count": len(env_var_configs),
+                "vault_suggestions_count": len(vault_suggestions.get("suggestions", [])),
+                "consul_services_count": len(consul_services.get("available", [])),
+                "infra_issues_count": len(infra_issues),
+            })
 
         return {
             **state,
+            "app_name": app_name,  # Store extracted app name for later use
             "env_var_configs": env_var_configs,  # Multi-source env var configurations
             "vault_suggestions": vault_suggestions,  # Legacy, for backward compatibility
             "consul_conventions": consul_conventions,
