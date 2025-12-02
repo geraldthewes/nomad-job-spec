@@ -7,11 +7,12 @@ import re
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import git
 
-from src.observability import get_observability
+if TYPE_CHECKING:
+    from src.observability import _SpanWrapper, _NoOpSpan
 
 logger = logging.getLogger(__name__)
 
@@ -353,24 +354,41 @@ def suggest_resources(dockerfile_info: DockerfileInfo | None, deps: DependencyIn
     return {"cpu": cpu, "memory": memory}
 
 
-def analyze_codebase(codebase_path: str) -> CodebaseAnalysis:
+def analyze_codebase(
+    codebase_path: str,
+    parent_span: "(_SpanWrapper | _NoOpSpan | None)" = None,
+) -> CodebaseAnalysis:
     """Perform complete analysis of a codebase for Nomad deployment.
 
     Args:
         codebase_path: Path to the codebase (local or will be cloned if URL).
+        parent_span: Optional parent span from the calling node. When provided,
+            tool operations are recorded as child spans under it.
 
     Returns:
         CodebaseAnalysis with all extracted information.
     """
+    from src.observability import get_observability, _NoOpSpan
+
     obs = get_observability()
-    trace = obs.create_trace(
-        name="analyze_codebase",
-        input={"codebase_path": codebase_path},
-    )
+
+    # Helper to create spans under parent if available
+    def create_span(name: str, **kwargs):
+        if parent_span is not None:
+            return obs.span(name, parent=parent_span, **kwargs)
+        else:
+            # No parent - return a no-op context manager
+            from contextlib import contextmanager
+
+            @contextmanager
+            def noop():
+                yield _NoOpSpan()
+
+            return noop()
 
     # Handle git URLs
     if codebase_path.startswith(("http://", "https://", "git@")):
-        with obs.span("clone_repository", trace=trace, input={"url": codebase_path}) as span:
+        with create_span("clone_repository", input={"url": codebase_path}) as span:
             codebase_path = clone_repository(codebase_path)
             span.end(output={"cloned_path": codebase_path})
 
@@ -382,9 +400,8 @@ def analyze_codebase(codebase_path: str) -> CodebaseAnalysis:
     files_analyzed = []
 
     # Find all Dockerfiles in the repository
-    with obs.span("find_dockerfiles", trace=trace, input={"path": str(path)}) as span:
+    with create_span("find_dockerfiles", input={"path": str(path)}) as span:
         dockerfiles_found = []
-        # Use glob to find all Dockerfile variants
         for dockerfile_path in path.glob("**/Dockerfile*"):
             # Skip directories, backup files, and documentation
             if dockerfile_path.is_dir():
@@ -411,7 +428,7 @@ def analyze_codebase(codebase_path: str) -> CodebaseAnalysis:
     # Parse the primary (first) Dockerfile for analysis
     if dockerfiles_found:
         primary_dockerfile = path / dockerfiles_found[0]
-        with obs.span("parse_dockerfile", trace=trace, input={"dockerfile": dockerfiles_found[0]}) as span:
+        with create_span("parse_dockerfile", input={"dockerfile": dockerfiles_found[0]}) as span:
             try:
                 analysis.dockerfile = parse_dockerfile(str(primary_dockerfile))
                 files_analyzed.append(dockerfiles_found[0])
@@ -425,7 +442,7 @@ def analyze_codebase(codebase_path: str) -> CodebaseAnalysis:
                 span.end(level="ERROR", status_message=str(e))
 
     # Detect language and dependencies
-    with obs.span("detect_language_and_deps", trace=trace, input={"path": str(path)}) as span:
+    with create_span("detect_language_and_deps", input={"path": str(path)}) as span:
         try:
             analysis.dependencies = detect_language_and_deps(str(path))
             # Track which files were analyzed
@@ -442,7 +459,7 @@ def analyze_codebase(codebase_path: str) -> CodebaseAnalysis:
             span.end(level="ERROR", status_message=str(e))
 
     # Detect environment variables
-    with obs.span("detect_env_vars", trace=trace, input={"path": str(path)}) as span:
+    with create_span("detect_env_vars", input={"path": str(path)}) as span:
         try:
             analysis.env_vars_required = detect_env_vars(str(path))
             span.end(output={"env_vars": analysis.env_vars_required, "count": len(analysis.env_vars_required)})
@@ -451,16 +468,11 @@ def analyze_codebase(codebase_path: str) -> CodebaseAnalysis:
             span.end(level="ERROR", status_message=str(e))
 
     # Suggest resources
-    with obs.span("suggest_resources", trace=trace) as span:
+    with create_span("suggest_resources") as span:
         analysis.suggested_resources = suggest_resources(analysis.dockerfile, analysis.dependencies)
         span.end(output=analysis.suggested_resources)
 
     analysis.files_analyzed = files_analyzed
-
-    # End the main trace
-    if trace is not None:
-        trace.end(output=analysis.to_dict())
-
     return analysis
 
 

@@ -130,10 +130,13 @@ def analyze_codebase_node(
             "codebase_analysis": {"error": "No codebase path provided"},
         }
 
-    # Step 1: Static analysis (already instrumented in analyze_codebase_tool)
+    # Step 1: Static analysis - pass span so tool creates child spans under it
     with obs.span("static_analysis", trace=trace, input={"path": codebase_path}) as span:
         try:
-            static_analysis: CodebaseAnalysis = analyze_codebase_tool(codebase_path)
+            static_analysis: CodebaseAnalysis = analyze_codebase_tool(
+                codebase_path,
+                parent_span=span,
+            )
             span.end(output={
                 "dockerfiles_found": len(static_analysis.dockerfiles_found),
                 "language": static_analysis.dependencies.language if static_analysis.dependencies else None,
@@ -142,7 +145,7 @@ def analyze_codebase_node(
         except Exception as e:
             span.end(level="ERROR", status_message=str(e))
             if trace:
-                trace.update(level="ERROR", status_message=f"Static analysis failed: {str(e)}")
+                trace.end(level="ERROR", status_message=f"Static analysis failed: {str(e)}")
             return {
                 **state,
                 "codebase_analysis": {"error": f"Static analysis failed: {str(e)}"},
