@@ -179,15 +179,8 @@ def generate(
                         session_id=session_id,
                         tags=["nomad-job-spec"],
                     ))
-                    # Log initial trace with codebase location
-                    trace = obs.create_trace(
-                        name="graph_start",
-                        input={"codebase_path": str(codebase_path.absolute()) if not is_git_url else path},
-                    )
-                    trace.end()
                 except Exception as e:
                     logger.warning(f"Failed to set up Langfuse attribute propagation: {e}")
-
             # First run - discover Dockerfiles
             with console.status("[bold green]Discovering Dockerfiles..."):
                 for event in graph.stream(state, config):
