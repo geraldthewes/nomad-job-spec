@@ -76,13 +76,14 @@ class PromptManager:
 
         try:
             # Fetch prompt from LangFuse
-            # If version is specified, use it; otherwise use label (default: production)
+            # Priority: version > explicit label > settings label
             if version is not None:
                 prompt = client.get_prompt(name, version=version)
             elif label:
                 prompt = client.get_prompt(name, label=label)
             else:
-                prompt = client.get_prompt(name)
+                # Use label from settings (default: "development")
+                prompt = client.get_prompt(name, label=self._settings.langfuse_prompt_label)
 
             # Convert LangFuse prompt to our internal format
             if prompt is None:

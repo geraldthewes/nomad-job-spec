@@ -142,6 +142,10 @@ class Settings(BaseSettings):
         default="https://cloud.langfuse.com",
         description="LangFuse base URL",
     )
+    langfuse_prompt_label: str = Field(
+        default="development",
+        description="LangFuse prompt label (e.g., 'development', 'staging', 'production')",
+    )
 
     @model_validator(mode="after")
     def validate_langfuse_keys(self) -> "Settings":
