@@ -92,7 +92,7 @@ class FabioClient:
                 response = client.get(f"{self.addr}/api/routes")
                 response.raise_for_status()
 
-                routes = self._parse_routes_csv(response.text)
+                routes = self._parse_routes_json(response.text)
                 self._routes_cache = routes
                 return routes
 
@@ -135,28 +135,28 @@ class FabioClient:
                 logger.error(f"Failed to fetch Fabio routes from {self.addr}: {e}")
             return []
 
-    def _parse_routes_csv(self, csv_data: str) -> list[FabioRouteEntry]:
-        """Parse Fabio CSV route data.
+    def _parse_routes_json(self, json_data: str) -> list[FabioRouteEntry]:
+        """Parse Fabio JSON route data.
 
-        Format: service,src,dst,weight,tags (no header)
-        Example: myapp,myapp.cluster:9999/,http://10.0.1.12:32456/,1.0,
+        Format: Array of route objects from /api/routes endpoint.
         """
         routes = []
-        for line in csv_data.strip().split("\n"):
-            if not line:
-                continue
-
-            parts = line.split(",")
-            if len(parts) >= 4:
+        try:
+            data = json.loads(json_data)
+            for entry in data:
                 routes.append(
                     FabioRouteEntry(
-                        service=parts[0],
-                        src=parts[1],
-                        dst=parts[2],
-                        weight=float(parts[3]) if parts[3] else 1.0,
-                        tags=parts[4].split(" ") if len(parts) > 4 and parts[4] else [],
+                        service=entry.get("service", ""),
+                        src=entry.get("src", ""),
+                        dst=entry.get("dst", ""),
+                        weight=float(entry.get("weight", 1.0)),
+                        tags=entry.get("tags", []),
                     )
                 )
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse Fabio routes JSON: {e}")
+        except (KeyError, TypeError, ValueError) as e:
+            logger.error(f"Invalid Fabio route entry format: {e}")
 
         return routes
 
