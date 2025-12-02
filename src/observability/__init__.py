@@ -179,25 +179,36 @@ class ObservabilityManager:
 
         return config
 
-    def create_trace(self, name: str, **kwargs: Any) -> Any:
+    def create_trace(self, name: str, **kwargs: Any) -> "_SpanWrapper | _NoOpSpan":
         """Create a manual trace for custom instrumentation.
+
+        In LangFuse v3+, traces are created implicitly via start_span().
+        This method creates a root span that acts as the trace container.
 
         Args:
             name: Name for the trace.
-            **kwargs: Additional trace parameters (session_id, user_id, etc.)
+            **kwargs: Additional trace parameters (input, metadata, etc.)
 
         Returns:
-            A Trace object, or None if LangFuse is unavailable.
+            A wrapped span object acting as the trace root, or _NoOpSpan if unavailable.
         """
         client = self.get_client()
         if client is None:
-            return None
+            return _NoOpSpan()
 
         try:
-            return client.trace(name=name, **kwargs)
+            # In v3+, start_span creates a span (and implicitly a trace)
+            span_kwargs: dict[str, Any] = {"name": name}
+            if "input" in kwargs:
+                span_kwargs["input"] = kwargs["input"]
+            if "metadata" in kwargs:
+                span_kwargs["metadata"] = kwargs["metadata"]
+
+            raw_span = client.start_span(**span_kwargs)
+            return _SpanWrapper(raw_span)
         except Exception as e:
             logger.warning(f"Failed to create trace: {e}")
-            return None
+            return _NoOpSpan()
 
     @contextmanager
     def span(
@@ -217,8 +228,8 @@ class ObservabilityManager:
 
         Args:
             name: Name for the span (e.g., "parse_dockerfile", "query_vault").
-            trace: Parent trace object. If None, creates a new trace.
-            parent: Parent span for nesting.
+            trace: Parent span/trace object. If None, creates a new root span.
+            parent: Parent span for nesting (alias for trace).
             input: Input data to record with the span.
             metadata: Additional metadata for the span.
 
@@ -232,42 +243,45 @@ class ObservabilityManager:
             yield _NoOpSpan()
             return
 
-        try:
-            # Create trace if not provided
-            if trace is None and parent is None:
-                trace = client.trace(name=f"{name}-trace")
+        # Use parent if provided, otherwise use trace
+        parent_span = parent or trace
+        span_obj = None
 
-            # Create the span
+        try:
+            # Build span kwargs
             span_kwargs: dict[str, Any] = {"name": name}
             if input is not None:
                 span_kwargs["input"] = input
             if metadata:
                 span_kwargs["metadata"] = metadata
 
-            if parent is not None:
-                span_obj = parent.span(**span_kwargs)
-            elif trace is not None:
-                span_obj = trace.span(**span_kwargs)
+            # Create span - either as child of parent or as new root
+            if parent_span is not None and hasattr(parent_span, "start_span"):
+                # parent_span might be a _SpanWrapper, which returns a wrapped span
+                raw_or_wrapped = parent_span.start_span(**span_kwargs)
+                if isinstance(raw_or_wrapped, _SpanWrapper):
+                    wrapped_span = raw_or_wrapped
+                else:
+                    wrapped_span = _SpanWrapper(raw_or_wrapped)
             else:
-                # Fallback: create as a trace
-                span_obj = client.trace(**span_kwargs)
-
-            try:
-                yield span_obj
-            except Exception as e:
-                # Record error in span
-                span_obj.end(
-                    level="ERROR",
-                    status_message=str(e),
-                )
-                raise
-            else:
-                # Span ended successfully (output should be set by caller via span.end())
-                pass
+                # Create new root span (implicitly creates trace)
+                raw_span = client.start_span(**span_kwargs)
+                wrapped_span = _SpanWrapper(raw_span)
 
         except Exception as e:
             logger.warning(f"Failed to create span '{name}': {e}")
             yield _NoOpSpan()
+            return
+
+        try:
+            yield wrapped_span
+        except Exception as e:
+            # Record error in span
+            wrapped_span.end(
+                level="ERROR",
+                status_message=str(e),
+            )
+            raise
 
     def traced(
         self,
@@ -337,6 +351,66 @@ class ObservabilityManager:
                 self._available = False
 
 
+class _SpanWrapper:
+    """Wrapper for LangfuseSpan that provides a compatible end() method.
+
+    In LangFuse v3+, end() only accepts end_time. This wrapper allows
+    passing output, level, status_message etc. to end() for convenience.
+    """
+
+    def __init__(self, span: Any):
+        self._span = span
+
+    def end(
+        self,
+        output: Any = None,
+        level: str | None = None,
+        status_message: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """End the span with optional output, level, and status_message.
+
+        In v3+, we call update() first to set these values, then end().
+        """
+        if self._span is None:
+            return
+
+        # Build update kwargs for any non-None values
+        update_kwargs: dict[str, Any] = {}
+        if output is not None:
+            update_kwargs["output"] = output
+        if level is not None:
+            update_kwargs["level"] = level
+        if status_message is not None:
+            update_kwargs["status_message"] = status_message
+
+        # Update the span with any provided values
+        if update_kwargs and hasattr(self._span, "update"):
+            self._span.update(**update_kwargs)
+
+        # End the span
+        if hasattr(self._span, "end"):
+            self._span.end()
+
+    def start_span(self, **kwargs: Any) -> "_SpanWrapper":
+        """Create a child span."""
+        if self._span is not None and hasattr(self._span, "start_span"):
+            return _SpanWrapper(self._span.start_span(**kwargs))
+        return _NoOpSpan()
+
+    def update(self, **kwargs: Any) -> "_SpanWrapper":
+        """Update span attributes."""
+        if self._span is not None and hasattr(self._span, "update"):
+            self._span.update(**kwargs)
+        return self
+
+    def update_trace(self, **kwargs: Any) -> "_SpanWrapper":
+        """Update the parent trace."""
+        if self._span is not None and hasattr(self._span, "update_trace"):
+            self._span.update_trace(**kwargs)
+        return self
+
+
 class _NoOpSpan:
     """No-op span for when LangFuse is unavailable."""
 
@@ -344,13 +418,21 @@ class _NoOpSpan:
         """No-op end method."""
         pass
 
-    def span(self, **kwargs: Any) -> "_NoOpSpan":
-        """Return another no-op span for nesting."""
+    def start_span(self, **kwargs: Any) -> "_NoOpSpan":
+        """Return another no-op span for nesting (v3+ API)."""
         return _NoOpSpan()
 
-    def update(self, **kwargs: Any) -> None:
+    def span(self, **kwargs: Any) -> "_NoOpSpan":
+        """Return another no-op span for nesting (legacy API)."""
+        return _NoOpSpan()
+
+    def update(self, **kwargs: Any) -> "_NoOpSpan":
         """No-op update method."""
-        pass
+        return self
+
+    def update_trace(self, **kwargs: Any) -> "_NoOpSpan":
+        """No-op update_trace method."""
+        return self
 
 
 # Module-level singleton
