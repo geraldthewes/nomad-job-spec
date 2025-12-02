@@ -179,7 +179,9 @@ def generate(
         if dockerfiles and not selected and not no_questions:
             selected = _collect_dockerfile_selection(current_state.values)
             if selected:
-                graph.update_state(config, {"selected_dockerfile": selected})
+                # Merge with full current state to preserve all values
+                updated_state = {**current_state.values, "selected_dockerfile": selected}
+                graph.update_state(config, updated_state)
 
         # Continue to analysis (whether selection was made or skipped)
         with console.status("[bold green]Analyzing codebase..."):

@@ -122,6 +122,8 @@ def analyze_codebase_node(
     )
 
     codebase_path = state.get("codebase_path")
+    selected_dockerfile = state.get("selected_dockerfile")
+
     if not codebase_path:
         if trace:
             trace.update(level="ERROR", status_message="No codebase path provided")
@@ -131,7 +133,6 @@ def analyze_codebase_node(
         }
 
     # Step 1: Static analysis - pass span so tool creates child spans under it
-    selected_dockerfile = state.get("selected_dockerfile")
     with obs.span("static_analysis", trace=trace, input={"path": codebase_path, "selected_dockerfile": selected_dockerfile}) as span:
         try:
             static_analysis: CodebaseAnalysis = analyze_codebase_tool(
