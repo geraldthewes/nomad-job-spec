@@ -74,6 +74,7 @@ dev = [
 
 [project.scripts]
 nomad-spec = "src.main:app"
+nomad-spec-prompt = "src.prompt_cli:app"
 
 [project.urls]
 Homepage = "https://github.com/gerald/nomad-job-spec"

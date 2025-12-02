@@ -306,3 +306,185 @@ class TestRealPromptFiles:
         text = manager.get_prompt_text("fix")
 
         assert "fix" in text.lower() or "error" in text.lower()
+
+
+class TestPushPullMethods:
+    """Tests for push/pull methods."""
+
+    def test_push_prompt_success(self, mock_settings, temp_prompts_dir):
+        """Verify push_prompt uploads to LangFuse."""
+        with patch("src.observability.get_observability") as mock_get_obs:
+            # Mock LangFuse client
+            mock_result = MagicMock()
+            mock_result.version = 1
+
+            mock_client = MagicMock()
+            mock_client.create_prompt.return_value = mock_result
+
+            mock_obs = MagicMock()
+            mock_obs.get_client.return_value = mock_client
+            mock_get_obs.return_value = mock_obs
+
+            # Update settings with prompt label
+            mock_settings.langfuse_prompt_label = "development"
+            manager = PromptManager(mock_settings, prompts_dir=temp_prompts_dir)
+
+            result = manager.push_prompt("test")
+
+            assert result["name"] == "test"
+            assert result["version"] == 1
+            assert result["label"] == "development"
+
+            # Verify create_prompt was called correctly
+            mock_client.create_prompt.assert_called_once()
+            call_kwargs = mock_client.create_prompt.call_args[1]
+            assert call_kwargs["name"] == "test"
+            assert call_kwargs["type"] == "chat"
+            assert call_kwargs["labels"] == ["development"]
+
+    def test_push_prompt_with_label(self, mock_settings, temp_prompts_dir):
+        """Verify push_prompt uses provided label."""
+        with patch("src.observability.get_observability") as mock_get_obs:
+            mock_result = MagicMock()
+            mock_result.version = 2
+
+            mock_client = MagicMock()
+            mock_client.create_prompt.return_value = mock_result
+
+            mock_obs = MagicMock()
+            mock_obs.get_client.return_value = mock_client
+            mock_get_obs.return_value = mock_obs
+
+            manager = PromptManager(mock_settings, prompts_dir=temp_prompts_dir)
+
+            result = manager.push_prompt("test", label="production")
+
+            assert result["label"] == "production"
+            call_kwargs = mock_client.create_prompt.call_args[1]
+            assert call_kwargs["labels"] == ["production"]
+
+    def test_push_prompt_not_found(self, mock_settings, temp_prompts_dir):
+        """Verify push_prompt raises error for missing prompt."""
+        manager = PromptManager(mock_settings, prompts_dir=temp_prompts_dir)
+
+        with pytest.raises(PromptNotFoundError) as exc_info:
+            manager.push_prompt("nonexistent")
+
+        assert "nonexistent" in str(exc_info.value)
+
+    def test_push_prompt_no_langfuse(self, mock_settings, temp_prompts_dir):
+        """Verify push_prompt raises error when LangFuse unavailable."""
+        with patch("src.observability.get_observability") as mock_get_obs:
+            mock_obs = MagicMock()
+            mock_obs.get_client.return_value = None
+            mock_get_obs.return_value = mock_obs
+
+            manager = PromptManager(mock_settings, prompts_dir=temp_prompts_dir)
+
+            with pytest.raises(RuntimeError) as exc_info:
+                manager.push_prompt("test")
+
+            assert "LangFuse not available" in str(exc_info.value)
+
+    def test_pull_prompt_success(self, mock_settings, tmp_path):
+        """Verify pull_prompt downloads from LangFuse."""
+        prompts_dir = tmp_path / "prompts"
+        prompts_dir.mkdir()
+
+        with patch("src.observability.get_observability") as mock_get_obs:
+            # Mock LangFuse prompt
+            mock_prompt = MagicMock()
+            mock_prompt.prompt = [
+                {"role": "system", "content": "Pulled from LangFuse"}
+            ]
+            mock_prompt.config = {"temperature": 0.5}
+            mock_prompt.version = 3
+
+            mock_client = MagicMock()
+            mock_client.get_prompt.return_value = mock_prompt
+
+            mock_obs = MagicMock()
+            mock_obs.get_client.return_value = mock_client
+            mock_get_obs.return_value = mock_obs
+
+            manager = PromptManager(mock_settings, prompts_dir=prompts_dir)
+
+            path = manager.pull_prompt("new_prompt")
+
+            assert path == prompts_dir / "new_prompt.json"
+            assert path.exists()
+
+            # Verify file contents
+            with open(path) as f:
+                data = json.load(f)
+            assert data["name"] == "new_prompt"
+            assert data["type"] == "chat"
+            assert data["version"] == 3
+
+    def test_pull_prompt_not_found(self, mock_settings, temp_prompts_dir):
+        """Verify pull_prompt raises error when prompt not in LangFuse."""
+        with patch("src.observability.get_observability") as mock_get_obs:
+            mock_client = MagicMock()
+            mock_client.get_prompt.side_effect = Exception("Not found")
+
+            mock_obs = MagicMock()
+            mock_obs.get_client.return_value = mock_client
+            mock_get_obs.return_value = mock_obs
+
+            manager = PromptManager(mock_settings, prompts_dir=temp_prompts_dir)
+
+            with pytest.raises(PromptNotFoundError) as exc_info:
+                manager.pull_prompt("nonexistent")
+
+            assert "nonexistent" in str(exc_info.value)
+
+    def test_pull_prompt_clears_cache(self, mock_settings, temp_prompts_dir):
+        """Verify pull_prompt clears cache for the pulled prompt."""
+        with patch("src.observability.get_observability") as mock_get_obs:
+            mock_prompt = MagicMock()
+            mock_prompt.prompt = [{"role": "system", "content": "New content"}]
+            mock_prompt.config = {}
+            mock_prompt.version = 2
+
+            mock_client = MagicMock()
+            mock_client.get_prompt.return_value = mock_prompt
+
+            mock_obs = MagicMock()
+            mock_obs.get_client.return_value = mock_client
+            mock_get_obs.return_value = mock_obs
+
+            manager = PromptManager(mock_settings, prompts_dir=temp_prompts_dir)
+
+            # Load prompt into cache
+            manager.get_prompt("test")
+            assert "test:None:None" in manager._cache
+
+            # Pull should clear cache
+            manager.pull_prompt("test")
+            assert "test:None:None" not in manager._cache
+
+    def test_push_all(self, mock_settings, temp_prompts_dir):
+        """Verify push_all pushes all prompts."""
+        with patch("src.observability.get_observability") as mock_get_obs:
+            mock_result = MagicMock()
+            mock_result.version = 1
+
+            mock_client = MagicMock()
+            mock_client.create_prompt.return_value = mock_result
+
+            mock_obs = MagicMock()
+            mock_obs.get_client.return_value = mock_client
+            mock_get_obs.return_value = mock_obs
+
+            mock_settings.langfuse_prompt_label = "development"
+            manager = PromptManager(mock_settings, prompts_dir=temp_prompts_dir)
+
+            results = manager.push_all()
+
+            # Should push both test and simple prompts
+            assert len(results) == 2
+            assert mock_client.create_prompt.call_count == 2
+
+            names = [r["name"] for r in results]
+            assert "test" in names
+            assert "simple" in names

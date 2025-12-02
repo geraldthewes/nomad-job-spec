@@ -276,6 +276,123 @@ class PromptManager:
             # Text prompt
             return str(prompt_content)
 
+    def push_prompt(
+        self,
+        name: str,
+        label: str | None = None,
+    ) -> dict[str, Any]:
+        """Push a local prompt to LangFuse.
+
+        Reads from prompts/{name}.json and creates a new version in LangFuse.
+        If the prompt already exists, creates a new version.
+
+        Args:
+            name: Prompt name (matches local file name without .json).
+            label: Optional label to apply (e.g., "production", "development").
+                   Defaults to LANGFUSE_PROMPT_LABEL setting.
+
+        Returns:
+            Dict with version info: {"name": str, "version": int, "label": str}
+
+        Raises:
+            PromptNotFoundError: If local prompt file not found.
+            RuntimeError: If LangFuse client is not available.
+        """
+        # Load from local file
+        data = self._load_from_file(name)
+        if data is None:
+            raise PromptNotFoundError(f"Local prompt '{name}' not found")
+
+        # Get LangFuse client
+        client = self._get_langfuse_client()
+        if client is None:
+            raise RuntimeError(
+                "LangFuse not available. Ensure LANGFUSE_ENABLED=true and credentials are set."
+            )
+
+        use_label = label or self._settings.langfuse_prompt_label
+
+        try:
+            # Create prompt in LangFuse
+            result = client.create_prompt(
+                name=name,
+                type=data.get("type", "text"),
+                prompt=data.get("prompt"),
+                config=data.get("config", {}),
+                labels=[use_label],
+            )
+
+            version = getattr(result, "version", 1)
+            logger.info(f"Pushed prompt '{name}' to LangFuse (v{version}, label: {use_label})")
+
+            return {
+                "name": name,
+                "version": version,
+                "label": use_label,
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to push prompt '{name}' to LangFuse: {e}")
+            raise RuntimeError(f"Failed to push prompt '{name}': {e}") from e
+
+    def pull_prompt(
+        self,
+        name: str,
+        version: int | None = None,
+        label: str | None = None,
+    ) -> Path:
+        """Pull a prompt from LangFuse to local file.
+
+        Overwrites the local file with the LangFuse version.
+
+        Args:
+            name: Prompt name.
+            version: Optional specific version number.
+            label: Optional label (e.g., "production").
+
+        Returns:
+            Path to the saved file.
+
+        Raises:
+            PromptNotFoundError: If prompt not found in LangFuse.
+        """
+        # Fetch from LangFuse
+        data = self._fetch_from_langfuse(name, version, label)
+        if data is None:
+            raise PromptNotFoundError(f"Prompt '{name}' not found in LangFuse")
+
+        # Ensure prompts directory exists
+        self._prompts_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save to local file
+        file_path = self._prompts_dir / f"{name}.json"
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+        logger.info(f"Pulled prompt '{name}' from LangFuse to {file_path}")
+
+        # Clear cache for this prompt
+        for key in list(self._cache.keys()):
+            if key.startswith(f"{name}:"):
+                del self._cache[key]
+
+        return file_path
+
+    def push_all(self, label: str | None = None) -> list[dict[str, Any]]:
+        """Push all local prompts to LangFuse.
+
+        Args:
+            label: Optional label to apply to all prompts.
+
+        Returns:
+            List of result dicts from push_prompt().
+        """
+        results = []
+        for name in self.list_prompts():
+            result = self.push_prompt(name, label)
+            results.append(result)
+        return results
+
     def list_prompts(self) -> list[str]:
         """List available prompt names from local files.
 
