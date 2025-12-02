@@ -65,6 +65,8 @@ Key configuration options:
 | `LANGFUSE_ENABLED` | Enable observability tracing | `false` |
 | `LANGFUSE_PUBLIC_KEY` | LangFuse public key (required when enabled) | - |
 | `LANGFUSE_SECRET_KEY` | LangFuse secret key (required when enabled) | - |
+| `LANGFUSE_BASE_URL` | LangFuse API base URL | `https://cloud.langfuse.com` |
+| `LANGFUSE_PROMPT_LABEL` | Prompt version label (development, staging, production) | `development` |
 
 ### 2. Analyze a Codebase
 
@@ -279,6 +281,7 @@ LANGFUSE_ENABLED=false
 # LANGFUSE_PUBLIC_KEY=pk-lf-...
 # LANGFUSE_SECRET_KEY=sk-lf-...
 LANGFUSE_BASE_URL=https://cloud.langfuse.com
+LANGFUSE_PROMPT_LABEL=development
 
 # Agent Configuration
 MAX_ITERATIONS=3
