@@ -1607,4 +1607,2298 @@ Plan: Vault, Consul, and Fabio Tool Integration
   - Resilient Design: All infrastructure queries are wrapped in try/except so tests and development work even without Vault/Consul/Fabio running
 
 
+Here is Claude's plan:
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Improve Infrastructure Connection Error Diagnostics
+
+ Goal
+
+ Improve error messages when Fabio, Nomad, or Consul connections fail, providing:
+ 1. Summary with fix hints (error type + suggested action)
+ 2. User confirmation when services are unavailable before continuing with defaults
+
+ Current Problem
+
+ The tool outputs cryptic messages like:
+ - Failed to fetch Fabio routes: [Errno 111] Connection refused
+ - Failed to get Nomad version: self does not exist, assuming 1.4.0
+ - Could not initialize Consul client: ...invalid, does not match <host>:<port>
+
+ These don't help users diagnose issues when services should be working.
+
+ Implementation Plan
+
+ 1. Create Infrastructure Status Module
+
+ New file: src/tools/infra_status.py
+
+ Create a centralized module for infrastructure health checking and status reporting:
+
+ @dataclass
+ class InfraStatus:
+     service: str              # "nomad", "consul", "fabio", "vault"
+     available: bool
+     address: str              # What address was attempted
+     error: str | None         # Error message if failed
+     suggestion: str | None    # Fix suggestion
+
+ @dataclass
+ class InfraHealthReport:
+     statuses: list[InfraStatus]
+     all_healthy: bool
+
+     def get_failures(self) -> list[InfraStatus]:
+         return [s for s in self.statuses if not s.available]
+
+ Include diagnostic functions:
+ - check_nomad_health(addr, token) - Try agent/self endpoint, parse error
+ - check_consul_health(addr, token) - Try /v1/status/leader
+ - check_fabio_health(addr) - Try /api/routes
+ - check_vault_health(addr, token) - Try /v1/sys/health
+
+ Each returns InfraStatus with helpful suggestions:
+ - Connection refused → "Check if {service} is running on {addr}"
+ - Timeout → "Service at {addr} not responding - check network/firewall"
+ - 401/403 → "Authentication failed - check {TOKEN_VAR} environment variable"
+ - DNS failure → "Could not resolve {host} - check DNS or use IP address"
+
+ 2. Update Infrastructure Clients
+
+ Files to modify:
+ - src/tools/nomad_version.py (lines 126-145)
+ - src/tools/consul.py (lines 98-111)
+ - src/tools/fabio.py (lines 90-101)
+ - src/tools/vault.py (around line 103)
+
+ Changes:
+ - Catch specific exception types (ConnectionRefusedError, TimeoutError, HTTPStatusError)
+ - Map each to a descriptive error + suggestion
+ - Preserve detailed info for logging, surface summary for user
+
+ Example for Nomad:
+ except requests.exceptions.ConnectionError as e:
+     return InfraStatus(
+         service="nomad",
+         available=False,
+         address=addr,
+         error="Connection refused",
+         suggestion=f"Check if Nomad is running at {addr}"
+     )
+ except nomad.api.exceptions.Unauthorized:
+     return InfraStatus(
+         service="nomad",
+         available=False,
+         address=addr,
+         error="Authentication failed",
+         suggestion="Set NOMAD_TOKEN environment variable with valid ACL token"
+     )
+
+ 3. Add User Confirmation Flow
+
+ File to modify: src/nodes/enrich.py
+
+ Before proceeding with defaults when services fail:
+ 1. Collect all infrastructure status checks
+ 2. If any critical services failed, display status summary
+ 3. Prompt user: "Continue without {service}? (uses defaults)"
+ 4. Store user's choice to avoid re-prompting
+
+ File to modify: src/main.py
+
+ Add infrastructure health check early in generate() command:
+ # After settings loaded, before graph execution
+ from src.tools.infra_status import check_all_infrastructure
+
+ health = check_all_infrastructure(settings)
+ if not health.all_healthy:
+     _display_infra_status(health)
+     if not no_questions:
+         if not Confirm.ask("Continue with available services?"):
+             raise typer.Exit(code=1)
+
+ 4. Rich Console Output for Status
+
+ File to modify: src/main.py
+
+ Add helper function _display_infra_status():
+ def _display_infra_status(health: InfraHealthReport):
+     table = Table(title="Infrastructure Status")
+     table.add_column("Service", style="cyan")
+     table.add_column("Status")
+     table.add_column("Address")
+     table.add_column("Action")
+
+     for s in health.statuses:
+         status = "[green]OK[/green]" if s.available else "[red]FAILED[/red]"
+         table.add_row(s.service, status, s.address, s.suggestion or "-")
+
+     console.print(table)
+
+ 5. Add --skip-infra-check Flag
+
+ File to modify: src/main.py
+
+ Add CLI option:
+ skip_infra_check: bool = typer.Option(
+     False,
+     "--skip-infra-check",
+     help="Skip infrastructure connectivity checks and use defaults",
+ )
+
+ When set, skip health checks and confirmation prompts (for CI/CD or offline use).
+
+ Files to Modify
+
+ | File                       | Changes                                        |
+ |----------------------------|------------------------------------------------|
+ | src/tools/infra_status.py  | NEW - Centralized health checking              |
+ | src/tools/nomad_version.py | Update get_nomad_version() error handling      |
+ | src/tools/consul.py        | Update ConsulClient.__init__() error handling  |
+ | src/tools/fabio.py         | Update FabioClient.get_routes() error handling |
+ | src/tools/vault.py         | Update VaultClient.__init__() error handling   |
+ | src/nodes/enrich.py        | Use new InfraStatus for decisions              |
+ | src/main.py                | Add health check display + confirmation + flag |
+
+ Expected Output After Changes
+
+ nomad-spec generate --path .
+
+ ┏━━━━━━━━━━━━━━━━━━━━━━━━━ Infrastructure Status ━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+ ┃ Service │ Status │ Address              │ Suggested Action              ┃
+ ┡━━━━━━━━━┿━━━━━━━━┿━━━━━━━━━━━━━━━━━━━━━━┿━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+ │ Nomad   │ OK     │ http://10.0.1.12:4646│ -                             │
+ │ Consul  │ FAILED │ http://10.0.1.12:8500│ Check if Consul is running    │
+ │ Fabio   │ FAILED │ http://localhost:9998│ Connection refused - check    │
+ │         │        │                      │ FABIO_ADMIN_ADDR setting      │
+ │ Vault   │ OK     │ http://10.0.1.12:8200│ -                             │
+ └─────────┴────────┴──────────────────────┴───────────────────────────────┘
+
+ Some infrastructure services are unavailable.
+ Continue with available services? [y/n]:
+
+ Testing Strategy
+
+ 1. Unit tests for infra_status.py with mocked responses
+ 2. Integration test with services intentionally stopped
+ 3. Test --skip-infra-check bypasses prompts
+ 4. Test each error type maps to correct suggestion
+
+ All tasks are complete. Let me provide a summary of what was implemented:
+
+  Summary
+
+  I've implemented improved infrastructure connection error diagnostics as requested. Here's what changed:
+
+  New File Created
+
+  - src/tools/infra_status.py - Centralized infrastructure health checking module with:
+    - InfraStatus dataclass for individual service status
+    - InfraHealthReport class for aggregated health reports
+    - Helper functions to parse connection errors and HTTP errors into actionable messages
+    - Health check functions for each service: check_nomad_health(), check_consul_health(), check_fabio_health(), check_vault_health()
+    - check_all_infrastructure() and check_infrastructure_from_settings() for comprehensive checks
+
+  Files Modified
+
+  1. src/main.py:
+    - Added --skip-infra-check CLI flag for CI/CD or offline use
+    - Added infrastructure health check before codebase analysis
+    - Added _display_infra_status() function to show a rich table with service status
+    - User confirmation prompt when services are unavailable
+  2. src/tools/nomad_version.py:
+    - Enhanced error handling with specific messages for connection refused, timeout, auth failures, and the cryptic "self does not exist" error
+  3. src/tools/consul.py:
+    - Enhanced error handling in all methods (get_kv, list_kv, put_kv, list_services, get_service, get_service_health)
+    - Specific messages for connection refused and ACL permission issues
+  4. src/tools/fabio.py:
+    - Enhanced error handling with specific exception types (HTTPStatusError, ConnectError, TimeoutException)
+    - Clear messages for each error type with suggested fixes
+  5. src/tools/vault.py:
+    - Enhanced error handling in list_secrets and read_metadata methods
+    - Better token warning message
+  6. src/nodes/enrich.py:
+    - Tracks infrastructure initialization issues
+    - Returns infra_issues in state for downstream visibility
+
+  Expected Output
+
+  When infrastructure services fail, users will now see:
+
+  ┏━━━━━━━━━━━━━━━━ Infrastructure Status ━━━━━━━━━━━━━━━━━┓
+  ┃ Service │ Status │ Address               │ Issue / Action            ┃
+  ┡━━━━━━━━━┿━━━━━━━━┿━━━━━━━━━━━━━━━━━━━━━━━┿━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+  │ Nomad   │   OK   │ http://10.0.1.12:4646 │ -                         │
+  │ Consul  │ FAILED │ http://10.0.1.12:8500 │ Connection refused        │
+  │         │        │                       │ Check if Consul is running│
+  │ Fabio   │ FAILED │ http://localhost:9998 │ Connection refused        │
+  │         │        │                       │ Check if Fabio is running │
+  │ Vault   │   OK   │ http://10.0.1.12:8200 │ -                         │
+  └─────────┴────────┴───────────────────────┴───────────────────────────┘
+
+  2 service(s) unavailable. Continue with available services? [y/n]:
+
+  All 99 existing tests pass.
+
+ Here is Claude's plan:
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Plan: Interactive Step-by-Step Vault Path Confirmation
+
+ Problem
+
+ Currently, Vault path suggestions for environment variables are presented as a single large question with all 5+ variables dumped at once. The user is told to
+ enter "confirm" or "specify custom paths" but it's unclear how to do the latter.
+
+ Desired UX Flow
+
+ A Claude Code-style interactive experience:
+ 1. Ask to enter "confirm" if all suggestions look correct, or "edit" if not
+ 2. If "edit": Step through each variable one at a time (no scrolling, replace in place)
+ 3. For each variable: show suggested path pre-filled, user can accept (Enter) or modify inline
+ 4. After all variables: show summary of all choices and ask confirm/edit again
+ 5. If "edit" at final review: re-run the entire sequence
+
+ Files to Modify
+
+ 1. src/main.py
+
+ - Create new function _collect_vault_path_responses() for the interactive Vault path flow
+ - Modify _collect_user_responses() to detect Vault path questions and route to the new handler
+
+ 2. src/graph.py
+
+ - Modify generate_questions_node() to mark Vault path questions specially (add metadata)
+ - Structure the question data to support step-by-step processing
+
+ Implementation Details
+
+ Step 1: Add question metadata structure in src/graph.py
+
+ Change the Vault suggestions question from a plain string to a structured dict:
+
+ # In generate_questions_node(), instead of appending a string:
+ questions.append({
+     "type": "vault_paths",
+     "suggestions": suggestions,  # The actual suggestion objects
+     "prompt": "Environment variable Vault paths"
+ })
+
+ Keep other questions as plain strings for backward compatibility.
+
+ Step 2: Create _collect_vault_path_responses() in src/main.py
+
+ def _collect_vault_path_responses(suggestions: list[dict]) -> dict[str, str]:
+     """Interactive step-by-step Vault path confirmation.
+
+     Flow:
+     1. Show summary table of all suggestions
+     2. Ask confirm/edit
+     3. If edit: step through each variable one by one
+     4. Show final summary and ask confirm/edit again
+     5. Return final mappings
+     """
+
+ Key components:
+ - Use Rich's Table to display summary
+ - Use Prompt.ask() with default= for pre-filled editable paths
+ - Use Confirm.ask() or string matching for confirm/edit choice
+ - Loop back if user chooses edit at final review
+
+ Step 3: Modify _collect_user_responses() in src/main.py
+
+ def _collect_user_responses(state: dict) -> dict[str, str]:
+     questions = state.get("questions", [])
+     responses = {}
+
+     console.print("\n[bold]Please answer the following questions:[/bold]\n")
+
+     for i, question in enumerate(questions, 1):
+         if isinstance(question, dict) and question.get("type") == "vault_paths":
+             # Route to special handler
+             vault_responses = _collect_vault_path_responses(question["suggestions"])
+             responses[f"q{i}"] = vault_responses  # Store as dict, not string
+         else:
+             # Original behavior for plain string questions
+             response = Prompt.ask(f"[cyan]{i}.[/cyan] {question}")
+             responses[f"q{i}"] = response
+
+     return responses
+
+ Step 4: Update spec generation to handle structured responses
+
+ In src/nodes/generate.py, ensure the code handles both:
+ - String response: "confirm" or custom paths as text
+ - Dict response: {"ENV_VAR": "path#key", ...} from new flow
+
+ Detailed UX Flow
+
+ Initial Display
+
+ ┌─────────────────────────────────────────────────────────────┐
+ │ Vault Path Suggestions                                       │
+ ├──────────────────────┬───────────────────────────┬──────────┤
+ │ Variable             │ Suggested Path            │ Confidence│
+ ├──────────────────────┼───────────────────────────┼──────────┤
+ │ APP_HOST             │ secret/data/app#host      │ 20%      │
+ │ AWS_ACCESS_KEY_ID    │ secret/data/aws#access_key│ 50%      │
+ │ ...                  │ ...                       │ ...      │
+ └──────────────────────┴───────────────────────────┴──────────┘
+
+ Accept all suggestions? [confirm/edit]: edit
+
+ Per-Variable Edit (replaces previous line, no scroll)
+
+ [1/5] APP_HOST
+ Path: secret/data/video-transcription/app#host    <- pre-filled, editable
+
+ User presses Enter to accept, or types new value.
+
+ Final Review
+
+ ┌─────────────────────────────────────────────────────────────┐
+ │ Final Vault Path Configuration                               │
+ ├──────────────────────┬───────────────────────────────────────┤
+ │ Variable             │ Path                                  │
+ ├──────────────────────┼───────────────────────────────────────┤
+ │ APP_HOST             │ secret/data/myapp/config#host         │
+ │ AWS_ACCESS_KEY_ID    │ secret/data/aws/prod#access_key       │
+ │ ...                  │ ...                                   │
+ └──────────────────────┴───────────────────────────────────────┘
+
+ Accept this configuration? [confirm/edit]: confirm
+
+ Terminal "No Scroll" Behavior
+
+ Rich doesn't have a built-in "replace previous line" mode, but we can achieve similar effect:
+ - Use console.print() normally for each step
+ - The terminal naturally scrolls, but each variable is just 2 lines
+ - Alternative: Use Rich's Live display for truly in-place updates (more complex)
+
+ Recommendation: Keep it simple with normal print - the key improvement is asking one variable at a time, not the in-place rendering.
+
+ Response Format Change
+
+ The Vault path response changes from:
+ {"q2": "confirm"}  # or some unclear custom format
+
+ To:
+ {"q2": {
+     "APP_HOST": "secret/data/myapp/config#host",
+     "AWS_ACCESS_KEY_ID": "secret/data/aws/prod#access_key",
+     ...
+ }}
+
+ This structured format is easier to consume in spec generation.
+
+ Integration with Spec Generation
+
+ Currently src/nodes/generate.py (lines 201-208) uses vault_suggestions from state to inject Vault paths into the LLM prompt. When user edits paths:
+
+ Option A (Simpler): Update vault_suggestions in state with user's confirmed/edited paths before continuing graph execution. This requires modifying how main.py
+ updates state after collecting responses.
+
+ Option B: Keep responses separate and have generate node merge user responses with original suggestions.
+
+ Recommendation: Option A - update vault_suggestions in main.py after collecting responses so the generate node doesn't need changes.
+
+ In main.py after collecting vault responses:
+ if isinstance(vault_responses, dict):
+     # User edited paths - update vault_suggestions
+     updated_suggestions = []
+     for env_var, path in vault_responses.items():
+         path_part, key_part = path.rsplit('#', 1) if '#' in path else (path, '')
+         updated_suggestions.append({
+             'env_var': env_var,
+             'suggested_path': path_part,
+             'key': key_part,
+             'vault_reference': path,
+             'confidence': 1.0,  # User confirmed
+         })
+     graph.update_state(config, {
+         "user_responses": responses,
+         "vault_suggestions": {"suggestions": updated_suggestions}
+     })
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+
+ Would you like to proceed?
+
+  Summary of Changes
+
+  1. src/graph.py - generate_questions_node() (lines 132-148)
+
+  Changed the Vault path question from a plain string to a structured dict:
+  questions.append({
+      "type": "vault_paths",
+      "suggestions": suggestions[:10],
+      "prompt": "Environment variable Vault paths",
+  })
+
+  2. src/main.py - New functions and modifications:
+
+  _collect_user_responses() (lines 281-302)
+  - Now checks if a question is a structured dict with type == "vault_paths"
+  - Routes such questions to the new _collect_vault_path_responses() handler
+
+  _collect_vault_path_responses() (lines 305-359)
+  - New function implementing the interactive step-by-step flow:
+    a. Shows summary table of all Vault path suggestions
+    b. Asks "Accept all suggestions? [confirm/edit]"
+    c. If edit: Steps through each variable one-by-one with pre-filled defaults
+    d. Shows final summary and loops back for confirmation
+
+  _display_vault_suggestions_table() (lines 362-401)
+  - Displays a Rich table with Variable, Path, and Confidence columns
+  - Shows "validated", percentage, or "custom" based on confidence/changes
+
+  _extract_vault_updates() (lines 404-439)
+  - Extracts confirmed Vault paths from responses
+  - Converts them to the vault_suggestions state format
+
+  State update in generate() (lines 184-192)
+  - Now updates both user_responses and vault_suggestions in state
+  - Ensures the generate node receives user-confirmed paths
+
+  UX Flow
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │ Vault Path Configuration                                     │
+  ├──────────────────────┬───────────────────────────┬──────────┤
+  │ Variable             │ Path                      │Confidence│
+  ├──────────────────────┼───────────────────────────┼──────────┤
+  │ APP_HOST             │ secret/data/app#host      │ 20%      │
+  │ AWS_ACCESS_KEY_ID    │ secret/data/aws#access_key│ 50%      │
+  └──────────────────────┴───────────────────────────┴──────────┘
+
+  Accept all suggestions? [confirm/edit]: edit
+
+  Press Enter to accept the suggested path, or type a new path.
+
+  [1/5] APP_HOST [secret/data/video-transcription/app#host]:
+  [2/5] AWS_ACCESS_KEY_ID [secret/data/aws/video-transcription#access_key]: secret/data/aws/prod#key
+
+  ... (shows summary table again for final confirmation)
+
+Here is Claude's plan:
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Plan: Multi-Source Environment Variable Configuration
+
+ Problem Statement
+
+ The current environment variable detection assumes all variables will come from Vault. In reality, environment variables can come from multiple sources:
+
+ 1. Fixed values - Static values like APP_HOST=0.0.0.0
+ 2. Consul KV - Non-secret configuration from Consul
+ 3. Vault - Actual secrets (API keys, passwords, etc.)
+
+ The tool should:
+ - Infer the likely source for each variable with smart defaults
+ - Display a table showing source and value/path for each
+ - Allow users to confirm or edit (same flow as today, but with source + value)
+
+ Files to Modify
+
+ | File                | Purpose                                               |
+ |---------------------|-------------------------------------------------------|
+ | src/tools/vault.py  | Add EnvVarConfig dataclass and source inference logic |
+ | src/main.py         | Update table display and edit flow to handle sources  |
+ | src/tools/hcl.py    | Add Consul template generation                        |
+ | src/nodes/enrich.py | Generate multi-source suggestions                     |
+ | src/graph.py        | Add env_var_configs to state schema                   |
+
+ ---
+ Implementation Steps
+
+ Step 1: Add EnvVarConfig dataclass in src/tools/vault.py
+
+ @dataclass
+ class EnvVarConfig:
+     name: str                                        # Variable name
+     source: Literal["fixed", "consul", "vault"]      # Source type
+     value: str                                       # Fixed value, Consul path, or Vault path
+     confidence: float = 0.0                          # 0.0-1.0
+
+ Step 2: Add source inference logic in src/tools/vault.py
+
+ Create suggest_env_configs(env_vars: list[str], app_name: str) -> list[EnvVarConfig]:
+
+ Inference rules:
+ | Pattern                              | Source | Default Value                     | Confidence |
+ |--------------------------------------|--------|-----------------------------------|------------|
+ | APP_HOST, HOST                       | fixed  | 0.0.0.0                           | 80%        |
+ | APP_PORT, PORT                       | fixed  | 8080                              | 60%        |
+ | *_PASSWORD, *_SECRET, *_KEY, *_TOKEN | vault  | secret/data/{app}/...             | 50-70%     |
+ | AWS_*                                | vault  | secret/data/aws/{app}#...         | 50%        |
+ | CONSUL_HOST, CONSUL_HTTP_ADDR        | fixed  | http://consul.service.consul:8500 | 60%        |
+ | *_URL, *_ADDR (non-secret)           | consul | {app}/config/...                  | 40%        |
+
+ Step 3: Update table display in src/main.py
+
+ Rename functions:
+ - _display_vault_suggestions_table → _display_env_config_table
+ - _collect_vault_path_responses → _collect_env_config_responses
+
+ New table format:
+                          Environment Variable Configuration
+ ┏━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┓
+ │ Variable              │ Source  │ Value/Path                      │ Confidence │
+ ┡━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━┩
+ │ APP_HOST              │ fixed   │ 0.0.0.0                         │        80% │
+ │ AWS_ACCESS_KEY_ID     │ vault   │ secret/data/aws/myapp#access_key│        50% │
+ │ REDIS_URL             │ consul  │ myapp/config/redis_url          │        40% │
+ └───────────────────────┴─────────┴─────────────────────────────────┴────────────┘
+
+ Step 4: Update edit flow in src/main.py
+
+ Current flow (lines 355-363):
+ for idx, s in enumerate(suggestions, 1):
+     env_var = s["env_var"]
+     current_path = paths[env_var]
+     new_path = Prompt.ask(f"[{idx}/{len(suggestions)}] {env_var}", default=current_path)
+     paths[env_var] = new_path
+
+ New flow:
+ for idx, cfg in enumerate(configs, 1):
+     console.print(f"\n[cyan][{idx}/{len(configs)}][/cyan] {cfg.name}")
+
+     # Ask for source
+     new_source = Prompt.ask(
+         "  Source",
+         choices=["fixed", "consul", "vault"],
+         default=cfg.source
+     )
+
+     # Ask for value/path (with appropriate hint)
+     if new_source == "fixed":
+         hint = "Enter fixed value"
+     elif new_source == "consul":
+         hint = f"Enter Consul KV path (e.g., {app_name}/config/...)"
+     else:
+         hint = "Enter Vault path (e.g., secret/data/.../key)"
+
+     new_value = Prompt.ask(f"  {hint}", default=cfg.value)
+
+     cfg.source = new_source
+     cfg.value = new_value
+
+ Step 5: Add Consul template generation in src/tools/hcl.py
+
+ Add new function _build_consul_templates(consul_vars: dict[str, str]) -> str:
+
+ def _build_consul_templates(consul_vars: dict[str, str]) -> str:
+     """Build Consul KV templates for environment variables."""
+     parts = []
+     for env_var, consul_path in consul_vars.items():
+         template = f'''
+       template {{
+         data = <<EOH
+ {{{{ key "{consul_path}" }}}}
+ EOH
+         destination = "local/{env_var.lower()}.env"
+         env         = true
+         change_mode = "restart"
+       }}'''
+         parts.append(template)
+     return "\n".join(parts)
+
+ Step 6: Update JobConfig in src/tools/hcl.py
+
+ Add new field:
+ consul_vars: dict[str, str] = field(default_factory=dict)  # env_var -> consul_path
+
+ Update generate_hcl() to call _build_consul_templates() when consul_vars is present.
+
+ Step 7: Update enrich node in src/nodes/enrich.py
+
+ Replace Vault-only suggestion logic with call to new suggest_env_configs().
+ Store result in state as env_var_configs: list[dict].
+
+ Step 8: Update state in src/graph.py
+
+ Add to AgentState:
+ env_var_configs: list[dict] = field(default_factory=list)
+
+ Step 9: Update generate node in src/nodes/generate.py
+
+ Parse env_var_configs and split into:
+ - env_vars (fixed values) → goes to JobConfig.env_vars
+ - consul_vars → goes to JobConfig.consul_vars
+ - vault_secrets → goes to VaultConfig.secrets
+
+ ---
+ Testing
+
+ Add tests for:
+ 1. Source inference patterns in tests/test_tools/test_vault.py
+ 2. Consul template generation in tests/test_tools/test_hcl.py
+ 3. Updated display/collection flow (manual testing)
+
+All tasks are complete. Here's a summary of the implementation:
+
+  Summary
+
+  I've implemented multi-source environment variable configuration. The tool now:
+
+  1. Infers the appropriate source for each env var:
+
+  - Fixed values - Variables like APP_HOST, APP_PORT, CONSUL_HTTP_ADDR get smart defaults (e.g., 0.0.0.0, 8080)
+  - Consul KV - URL/config-type variables like REDIS_URL get Consul paths (e.g., myapp/config/redis_url)
+  - Vault secrets - Secret variables like AWS_*, *_PASSWORD, *_KEY get Vault paths
+
+  2. Displays a multi-source table:
+
+                       Environment Variable Configuration
+  ┏━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┓
+  │ Variable              │ Source  │ Value/Path                      │ Confidence │
+  ┡━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━┩
+  │ APP_HOST              │ fixed   │ 0.0.0.0                         │        80% │
+  │ AWS_ACCESS_KEY_ID     │ vault   │ secret/data/aws/myapp#access_key│        50% │
+  │ REDIS_URL             │ consul  │ myapp/config/redis_url          │        40% │
+  └───────────────────────┴─────────┴─────────────────────────────────┴────────────┘
+
+  3. Allows editing with source selection:
+
+  During edit mode, the user can now change both the source (fixed/consul/vault) and the value/path for each variable.
+
+  4. Generates appropriate HCL:
+
+  - Fixed → Direct env { VAR = "value" } block
+  - Consul → Template block with {{ key "path" }}
+  - Vault → Template or native vault env stanza (depending on Nomad version)
+
+  Files Modified:
+
+  - src/tools/vault.py - Added EnvVarConfig and suggest_env_configs()
+  - src/tools/hcl.py - Added consul_vars field and _build_consul_templates()
+  - src/main.py - Updated table display and edit flow
+  - src/nodes/enrich.py - Generates multi-source suggestions
+  - src/nodes/generate.py - Uses confirmed configs for job config
+  - src/graph.py - Added env_var_configs to state
+
+
+● LangGraph Graph Architecture
+
+  This application uses a LangGraph StateGraph to orchestrate Nomad job specification generation and deployment. Here's the breakdown:
+
+  State Schema (src/graph.py:20-68)
+
+  The AgentState tracks:
+  - Input: prompt, codebase_path
+  - Analysis: codebase_analysis (extracted dependencies, ports, resources)
+  - Conversation: messages, questions, user_responses
+  - Generation: job_spec (HCL), job_config, hcl_valid, validation_error
+  - Deployment: job_id, deployment_status, deployment_error
+  - Iteration: iteration_count, max_iterations
+  - Infrastructure: env_var_configs, vault_suggestions, consul_conventions, fabio_validation, nomad_info
+
+  ---
+  Nodes
+
+  | Node     | File                          | Purpose                                                                              |
+  |----------|-------------------------------|--------------------------------------------------------------------------------------|
+  | analyze  | src/nodes/analyze.py          | Static + LLM-based codebase analysis (Dockerfile, dependencies, ports, resources)    |
+  | enrich   | src/nodes/enrich.py           | Query Vault, Consul, Fabio for infrastructure context; generate env var configs      |
+  | question | src/graph.py:118-194          | Generate clarifying questions based on analysis (Docker image, ports, scaling, etc.) |
+  | collect  | src/graph.py:197-203          | Human-in-the-loop interrupt point for user responses                                 |
+  | generate | src/nodes/generate.py:104-183 | Generate Nomad HCL spec using LLM with enriched context                              |
+  | validate | src/nodes/validate.py         | Pre-deployment validation (Fabio conflicts, Vault paths, HCL syntax)                 |
+  | deploy   | src/graph.py:337-343          | Register job with Nomad cluster (stub for Phase 2)                                   |
+  | verify   | src/graph.py:346-351          | Poll deployment status (stub for Phase 2)                                            |
+  | fix      | src/nodes/generate.py:524-593 | Regenerate spec on failure using error context + Mem0 memories                       |
+
+  ---
+  Graph Flow
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                        Main Flow                                 │
+  └─────────────────────────────────────────────────────────────────┘
+
+  START ──► analyze ──► enrich ──► question ──► collect ──► generate ──► validate
+                                                   ▲                        │
+                                                   │                        ▼
+                                              (interrupt)         should_proceed_after_validation()
+                                                                      │           │
+                                                                "proceed"    "blocked"
+                                                                      │           │
+                                                                      ▼           ▼
+                                                                   deploy        END
+                                                                      │
+                                                                      ▼
+                                                                   verify
+                                                                      │
+                                                                      ▼
+                                                              should_retry()
+                                                            /      |       \
+                                                      "retry"  "success"  "give_up"
+                                                         │         │          │
+                                                         ▼         ▼          ▼
+                                                        fix       END        END
+                                                         │
+                                                         └──────► generate (loop back)
+
+  ---
+  Conditional Routing Logic
+
+  1. should_proceed_after_validation() (src/nodes/validate.py:198-208):
+    - Returns "proceed" → continue to deploy
+    - Returns "blocked" → end (Fabio conflicts in STRICT mode)
+  2. should_retry() (src/graph.py:206-235):
+    - Returns "success" → deployment succeeded, end
+    - Returns "give_up" → max iterations hit, unfixable error, or timeout
+    - Returns "retry" → loop back through fix → generate
+
+  ---
+  Key Design Patterns
+
+  1. Factory Functions: Nodes created via create_analyze_node(llm) to inject dependencies
+  2. Human-in-the-Loop: Graph interrupts at collect node for user input
+  3. Infrastructure Resilience: enrich node handles unavailable services gracefully
+  4. Error Recovery: fix node uses Mem0 memories + error context for intelligent retries (max 3 iterations)
+  5. Checkpointing: Optional MemorySaver() for state persistence across sessions
+
+
+LLM Prompts Location Summary
+
+  The LLM prompts are defined as constants in the node files:
+
+  ---
+  1. ANALYSIS_SYSTEM_PROMPT - Analyze Node
+
+  File: src/nodes/analyze.py:16-72
+
+  Used by the analyze node to extract deployment requirements from codebase. Instructs the LLM to:
+  - Classify service type (LIGHT/MEDIUM/HEAVY/COMPUTE)
+  - Identify Docker image, ports, env vars, secrets
+  - Determine resource requirements, health checks, storage needs
+  - Output structured JSON analysis
+
+  ---
+  2. GENERATION_SYSTEM_PROMPT - Generate Node
+
+  File: src/nodes/generate.py:24-101
+
+  Used by both generate and fix nodes to create Nomad job specs. Covers:
+  - Cluster environment (Terraform templating, Fabio, Vault, CSI)
+  - Service type resource defaults
+  - JSON output schema for job configuration
+  - Volume and Vault secrets format
+
+  ---
+  3. Fix/Iteration Prompt - Fix Node
+
+  File: src/nodes/generate.py:543-566
+
+  Dynamically built prompt for the fix node that includes:
+  - Previous error message
+  - Current HCL spec
+  - Similar past errors from Mem0 memories
+  - Common fix suggestions
+
+  ---
+  4. Question Generation - Question Node
+
+  File: src/graph.py:118-194
+
+  No LLM call - Questions are generated programmatically based on analysis gaps:
+  - Missing Docker image
+  - Missing ports
+  - Environment variable configuration (multi-source)
+  - Fabio routing confirmation
+  - Resource appropriateness
+  - Instance count
+
+  ---
+  5. Context Builder
+
+  File: src/nodes/generate.py:186-284
+
+  The _build_generation_context() function assembles the HumanMessage content including:
+  - User's deployment request
+  - Codebase analysis JSON
+  - User responses to questions
+  - Multi-source env var configs (fixed, Consul KV, Vault)
+  - Fabio routing suggestions
+  - Nomad version info
+  - Relevant past memories
+
+  ---
+  Quick Reference
+
+  | Prompt                   | File                  | Lines   |
+  |--------------------------|-----------------------|---------|
+  | ANALYSIS_SYSTEM_PROMPT   | src/nodes/analyze.py  | 16-72   |
+  | GENERATION_SYSTEM_PROMPT | src/nodes/generate.py | 24-101  |
+  | Fix prompt (inline)      | src/nodes/generate.py | 543-566 |
+  | Context builder          | src/nodes/generate.py | 186-284 |
+  | Question logic           | src/graph.py          | 118-194 |
+
+  Note: Prompts are currently hardcoded in Python files. LangFuse integration for centralized prompt management is mentioned in CLAUDE.md but not yet
+  implemented.
+
+LangFuse Integration Status: PARTIAL (~15% complete)
+
+  The integration is configured but not implemented. Here's the breakdown:
+
+  What Exists ✓
+
+  | Component               | Location                      | Status                           |
+  |-------------------------|-------------------------------|----------------------------------|
+  | Dependency              | pyproject.toml:55             | langfuse>=2.0.0 installed        |
+  | Settings                | config/settings.py:126-160    | Full config with validation      |
+  | Callback infrastructure | src/llm/provider.py:178-196   | get_llm_with_callbacks() exists  |
+  | Observability module    | src/observability/__init__.py | Empty placeholder                |
+  | Environment vars        | README.md                     | Documented (disabled by default) |
+
+  What's Missing ✗
+
+  1. No LangFuse client initialization - src/observability/__init__.py is empty
+  2. No tracing - No @observe decorators or CallbackHandler usage on nodes
+  3. No prompt management - No langfuse.get_prompt() calls; prompts are hardcoded
+  4. No graph integration - compile_graph() doesn't wire up callbacks to LLM
+  5. No tests - LangFuse is disabled in test fixtures (tests/conftest.py:114)
+
+  Current Config (not used)
+
+  # config/settings.py
+  langfuse_enabled: bool = False  # Disabled by default
+  langfuse_public_key: str | None = None
+  langfuse_secret_key: str | None = None
+  langfuse_base_url: str = "https://cloud.langfuse.com"
+
+  To Complete Integration
+
+  Files that need implementation:
+  1. src/observability/__init__.py - Initialize Langfuse() client, create CallbackHandler
+  2. src/graph.py - Pass callbacks to LLM in node creation
+  3. src/nodes/*.py - Add @observe decorators or use traced LLM
+  4. src/main.py - Conditionally initialize based on settings.langfuse_enabled
+
+  Would you like me to implement the LangFuse integration?
+
+
+Here is Claude's plan:
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ LangFuse Integration Plan
+
+ Summary
+
+ Complete LangFuse integration with:
+ 1. Tracing - All LLM calls traced to LangFuse
+ 2. Prompt Management - Centralized prompts fetched from LangFuse with local JSON fallback
+ 3. Graceful Degradation - Works identically when LangFuse disabled
+
+ Implementation Order
+
+ Phase 1: Core Infrastructure
+
+ 1. Create src/observability/__init__.py
+
+ Currently empty. Implement ObservabilityManager class:
+
+ class ObservabilityManager:
+     def __init__(self, settings: Settings): ...
+     def is_enabled(self) -> bool: ...
+     def get_client(self) -> Langfuse | None: ...
+     def get_handler(self, trace_name, session_id, ...) -> CallbackHandler | None: ...
+     def flush(self) -> None: ...
+     def shutdown(self) -> None: ...
+
+ def get_observability(settings: Settings | None = None) -> ObservabilityManager: ...
+ def reset_observability() -> None: ...  # For testing
+
+ Key behaviors:
+ - Lazy initialization with auth_check() to verify connection
+ - Returns None for handlers when disabled/unavailable
+ - Logs warnings but never raises on LangFuse failures
+
+ 2. Create fallback prompt files in prompts/ directory
+
+ Create JSON files in LangFuse export format:
+
+ | File                    | Source                        | Lines                    |
+ |-------------------------|-------------------------------|--------------------------|
+ | prompts/analysis.json   | src/nodes/analyze.py:16-72    | ANALYSIS_SYSTEM_PROMPT   |
+ | prompts/generation.json | src/nodes/generate.py:24-101  | GENERATION_SYSTEM_PROMPT |
+ | prompts/fix.json        | src/nodes/generate.py:543-562 | Inline fix prompt        |
+
+ Format:
+ {
+   "name": "analysis",
+   "type": "chat",
+   "prompt": [{"role": "system", "content": "..."}],
+   "config": {"model": "auto", "temperature": 0.1},
+   "version": 1,
+   "labels": ["production"],
+   "tags": ["nomad"]
+ }
+
+ 3. Create src/prompts/__init__.py
+
+ Currently empty. Implement PromptManager class:
+
+ class PromptNotFoundError(Exception): ...
+
+ class PromptManager:
+     def get_prompt(self, name, version=None, label=None) -> ChatPromptTemplate: ...
+     def get_prompt_text(self, name, ...) -> str: ...
+     def list_prompts(self) -> list[str]: ...
+     def clear_cache(self) -> None: ...
+
+ def get_prompt_manager(settings: Settings | None = None) -> PromptManager: ...
+ def reset_prompt_manager() -> None: ...  # For testing
+
+ Key behaviors:
+ - Try LangFuse first via langfuse.get_prompt(name, label=label)
+ - Fall back to prompts/{name}.json if LangFuse unavailable/missing
+ - Cache prompts for performance
+ - Convert to LangChain ChatPromptTemplate
+
+ ---
+ Phase 2: Integration
+
+ 4. Update src/llm/provider.py:178-196
+
+ Modify get_llm_with_callbacks() to auto-add LangFuse handler:
+
+ def get_llm_with_callbacks(
+     callbacks: list[Any] | None = None,
+     settings: Settings | None = None,
+     trace_name: str | None = None,
+     session_id: str | None = None,
+ ) -> BaseChatModel:
+     # Add LangFuse handler if enabled and no explicit callbacks
+     if not callbacks:
+         obs = get_observability(settings)
+         handler = obs.get_handler(trace_name=trace_name, session_id=session_id)
+         if handler:
+             all_callbacks.append(handler)
+     ...
+
+ 5. Update src/graph.py:354-381
+
+ Modify compile_graph() to accept session_id and wire callbacks:
+
+ def compile_graph(
+     llm: BaseChatModel,
+     settings: Settings | None = None,
+     include_deployment: bool = True,
+     enable_checkpointing: bool = True,
+     session_id: str | None = None,  # NEW
+ ):
+     # Wire LangFuse callbacks to LLM
+     obs = get_observability(settings)
+     if obs.is_enabled():
+         handler = obs.get_handler(trace_name="nomad-job-spec", session_id=session_id)
+         if handler:
+             llm = llm.with_config(callbacks=[handler])
+     ...
+
+ 6. Update src/nodes/analyze.py
+
+ Replace hardcoded prompt with dynamic fetching:
+
+ from src.prompts import get_prompt_manager, PromptNotFoundError
+
+ # Rename to _FALLBACK_ANALYSIS_PROMPT (keep as ultimate fallback)
+ _FALLBACK_ANALYSIS_PROMPT = """..."""
+
+ def _get_analysis_prompt() -> str:
+     try:
+         return get_prompt_manager().get_prompt_text("analysis")
+     except PromptNotFoundError:
+         logger.warning("Using hardcoded analysis prompt")
+         return _FALLBACK_ANALYSIS_PROMPT
+
+ Update _perform_llm_analysis() to call _get_analysis_prompt().
+
+ 7. Update src/nodes/generate.py
+
+ Same pattern - replace GENERATION_SYSTEM_PROMPT with _get_generation_prompt().
+
+ For the fix prompt (lines 543-562):
+ - Extract to _FALLBACK_FIX_PROMPT constant
+ - Add _get_fix_prompt() function
+ - Note: The fix prompt is a template with {error}, {current_spec}, {memories} - store the template in JSON
+
+ 8. Update src/main.py:124-138
+
+ Initialize observability and pass session_id:
+
+ from src.observability import get_observability
+
+ # After settings initialization
+ obs = get_observability(settings)
+ if obs.is_enabled():
+     console.print("[dim]LangFuse tracing enabled[/dim]")
+
+ # Generate session ID
+ session_id = f"session-{cluster_id}-{id(settings)}"
+
+ # Update compile_graph call
+ graph = compile_graph(
+     llm=llm,
+     settings=settings,
+     include_deployment=not dry_run,
+     enable_checkpointing=not no_questions,
+     session_id=session_id,  # NEW
+ )
+
+ # At end of command
+ finally:
+     obs.flush()
+
+ ---
+ Phase 3: Testing
+
+ 9. Create tests/test_observability.py
+
+ - test_disabled_by_default
+ - test_enabled_with_valid_keys
+ - test_handles_connection_failure
+ - test_returns_singleton
+
+ 10. Create tests/test_prompts.py
+
+ - test_loads_from_file
+ - test_prompt_not_found_error
+ - test_langfuse_fallback_to_file
+ - test_caching
+
+ 11. Update tests/conftest.py
+
+ Add fixtures:
+ @pytest.fixture
+ def mock_observability():
+     from src.observability import reset_observability
+     reset_observability()
+     yield
+     reset_observability()
+
+ ---
+ Files Summary
+
+ New Files
+
+ | Path                          | Purpose                                      |
+ |-------------------------------|----------------------------------------------|
+ | src/observability/__init__.py | LangFuse client management (~120 lines)      |
+ | src/prompts/__init__.py       | Prompt management with fallback (~150 lines) |
+ | prompts/analysis.json         | Analysis prompt in LangFuse format           |
+ | prompts/generation.json       | Generation prompt in LangFuse format         |
+ | prompts/fix.json              | Fix prompt template in LangFuse format       |
+ | tests/test_observability.py   | Observability tests (~80 lines)              |
+ | tests/test_prompts.py         | Prompt manager tests (~100 lines)            |
+
+ Modified Files
+
+ | Path                  | Changes                                    |
+ |-----------------------|--------------------------------------------|
+ | src/llm/provider.py   | Add auto-LangFuse handler (~10 lines)      |
+ | src/graph.py          | Add session_id, wire callbacks (~15 lines) |
+ | src/nodes/analyze.py  | Use managed prompts (~20 lines)            |
+ | src/nodes/generate.py | Use managed prompts (~30 lines)            |
+ | src/main.py           | Initialize observability (~15 lines)       |
+ | tests/conftest.py     | Add reset fixtures (~10 lines)             |
+
+ ---
+ Verification Checklist
+
+ After implementation:
+ - LANGFUSE_ENABLED=false works without errors
+ - LANGFUSE_ENABLED=true without keys shows clear validation error
+ - LANGFUSE_ENABLED=true with valid keys creates traces
+ - Prompts load from local JSON when LangFuse disabled
+ - Prompts fall back to JSON when LangFuse prompt missing
+ - All existing tests pass
+ - New tests pass
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+
+ Would you like to proceed?
+
+● The LangFuse integration is complete. Here's a summary of what was implemented:
+
+  Summary
+
+  New Files Created
+
+  | File                          | Purpose                                                                |
+  |-------------------------------|------------------------------------------------------------------------|
+  | src/observability/__init__.py | LangFuse client management with ObservabilityManager class             |
+  | src/prompts/__init__.py       | Prompt management with PromptManager class and LangFuse/fallback logic |
+  | prompts/analysis.json         | Analysis prompt in LangFuse JSON format                                |
+  | prompts/generation.json       | Generation prompt in LangFuse JSON format                              |
+  | prompts/fix.json              | Fix prompt in LangFuse JSON format                                     |
+  | tests/test_observability.py   | 14 tests for observability module                                      |
+  | tests/test_prompts.py         | 19 tests for prompt management                                         |
+
+  Modified Files
+
+  | File                  | Changes                                                                    |
+  |-----------------------|----------------------------------------------------------------------------|
+  | src/llm/provider.py   | Added auto-LangFuse handler in get_llm_with_callbacks()                    |
+  | src/graph.py          | Added session_id parameter and LangFuse callback wiring in compile_graph() |
+  | src/nodes/analyze.py  | Uses _get_analysis_prompt() with fallback to _FALLBACK_ANALYSIS_PROMPT     |
+  | src/nodes/generate.py | Uses _get_generation_prompt() and _get_fix_prompt() with fallbacks         |
+  | src/main.py           | Initializes observability and passes session_id to graph                   |
+  | tests/conftest.py     | Added reset_singletons fixture                                             |
+
+  Key Features
+
+  - Graceful degradation: Works identically when LangFuse is disabled or unavailable
+  - Fallback prompts: Local JSON files in LangFuse export format for easy editing
+  - Tracing: All LLM calls traced when LangFuse is enabled
+  - Prompt management: Prompts fetched from LangFuse with automatic fallback to local files
+  - LangFuse v3 compatible: Uses langfuse.langchain.CallbackHandler import path
+
+  Verification
+
+  - All 132 tests pass
+  - New observability and prompts tests (33 tests) all pass
+  - Module imports work correctly
+  - Prompt loading from local files verified
+
+Here is Claude's plan:
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Prompt Lifecycle Management Plan
+
+ Overview
+
+ This plan adds prompt upload and sync capabilities to complete the LangFuse integration.
+
+ Problem: Local prompts exist in prompts/*.json but LangFuse has no prompts. Need:
+ 1. Bootstrap: Upload local prompts to LangFuse (one-time setup)
+ 2. Sync: CLI commands to push/pull prompts between local and LangFuse
+ 3. Future DSPy: Architecture ready for optimization loops
+
+ Architecture
+
+ ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+ │  Local Files    │◄───►│    LangFuse     │◄───►│     DSPy        │
+ │  prompts/*.json │     │  (runtime       │     │  (future        │
+ │  (version       │     │   source)       │     │   optimization) │
+ │   controlled)   │     │                 │     │                 │
+ └─────────────────┘     └─────────────────┘     └─────────────────┘
+         │                       │                       │
+         │    push               │    get_prompt()       │    optimize
+         │────────────────►      │  ◄────────────────────│
+         │    pull               │    create_prompt()    │
+         │◄────────────────      │  ◄────────────────────│
+
+ Source of Truth Strategy
+
+ | Environment | Primary Source                | Fallback   |
+ |-------------|-------------------------------|------------|
+ | Production  | LangFuse (label: production)  | Local JSON |
+ | Development | LangFuse (label: development) | Local JSON |
+ | CI/Testing  | Local JSON files only         | Hardcoded  |
+
+ Key Principle: Local files are the version-controlled baseline. LangFuse is the runtime source. Changes flow: Local → LangFuse → Runtime.
+
+ ---
+ Implementation
+
+ Phase 1: PromptManager Extensions
+
+ Add push/pull methods to src/prompts/__init__.py (~80 lines):
+
+ def push_prompt(self, name: str, label: str | None = None) -> dict[str, Any]:
+     """Push a local prompt to LangFuse.
+
+     Returns: {"name": str, "version": int, "label": str}
+     """
+     data = self._load_from_file(name)
+     if data is None:
+         raise PromptNotFoundError(f"Local prompt '{name}' not found")
+
+     client = self._get_langfuse_client()
+     if client is None:
+         raise RuntimeError("LangFuse not available")
+
+     use_label = label or self._settings.langfuse_prompt_label
+
+     result = client.create_prompt(
+         name=name,
+         type=data.get("type", "text"),
+         prompt=data.get("prompt"),
+         config=data.get("config", {}),
+         labels=[use_label],
+     )
+
+     return {"name": name, "version": result.version, "label": use_label}
+
+ def pull_prompt(self, name: str, version: int | None = None, label: str | None = None) -> Path:
+     """Pull prompt from LangFuse to local file."""
+     data = self._fetch_from_langfuse(name, version, label)
+     if data is None:
+         raise PromptNotFoundError(f"Prompt '{name}' not found in LangFuse")
+
+     file_path = self._prompts_dir / f"{name}.json"
+     with open(file_path, "w", encoding="utf-8") as f:
+         json.dump(data, f, indent=2)
+     return file_path
+
+ def push_all(self, label: str | None = None) -> list[dict]:
+     """Push all local prompts to LangFuse."""
+     return [self.push_prompt(name, label) for name in self.list_prompts()]
+
+ ---
+ Phase 2: CLI Commands
+
+ Add prompts subcommand group to src/main.py (~100 lines):
+
+ # Push all local prompts to LangFuse
+ nomad-spec prompts push
+
+ # Push specific prompt
+ nomad-spec prompts push --name analysis
+
+ # Push with label (default: from LANGFUSE_PROMPT_LABEL)
+ nomad-spec prompts push --label production
+
+ # Pull all prompts from LangFuse
+ nomad-spec prompts pull
+
+ # Pull specific prompt
+ nomad-spec prompts pull --name analysis
+
+ # List prompts (local and LangFuse status)
+ nomad-spec prompts list
+
+ Implementation in src/main.py:
+
+ prompts_app = typer.Typer(help="Manage prompts")
+ app.add_typer(prompts_app, name="prompts")
+
+ @prompts_app.command("push")
+ def prompts_push(
+     name: Optional[str] = typer.Option(None, "--name", help="Specific prompt"),
+     label: Optional[str] = typer.Option(None, "--label", help="Label to apply"),
+ ):
+     """Push local prompts to LangFuse."""
+     settings = get_settings()
+     if not settings.langfuse_enabled:
+         console.print("[red]Error:[/red] LANGFUSE_ENABLED must be true")
+         raise typer.Exit(1)
+
+     manager = get_prompt_manager(settings)
+
+     if name:
+         result = manager.push_prompt(name, label)
+         console.print(f"[green]✓[/green] {result['name']} → v{result['version']} ({result['label']})")
+     else:
+         results = manager.push_all(label)
+         for r in results:
+             console.print(f"[green]✓[/green] {r['name']} → v{r['version']} ({r['label']})")
+
+ @prompts_app.command("pull")
+ def prompts_pull(
+     name: Optional[str] = typer.Option(None, "--name", help="Specific prompt"),
+     label: Optional[str] = typer.Option(None, "--label", help="Label to pull"),
+ ):
+     """Pull prompts from LangFuse to local files."""
+     ...
+
+ @prompts_app.command("list")
+ def prompts_list():
+     """List available prompts."""
+     manager = get_prompt_manager()
+     for name in manager.list_prompts():
+         console.print(f"  • {name}")
+
+ ---
+ Phase 3: Bootstrap Script
+
+ Create scripts/bootstrap_prompts.py for one-time setup (~40 lines):
+
+ #!/usr/bin/env python3
+ """Bootstrap: Upload all local prompts to LangFuse.
+
+ Usage:
+     python scripts/bootstrap_prompts.py
+     python scripts/bootstrap_prompts.py --label development
+ """
+ import argparse
+ from config.settings import get_settings
+ from src.prompts import get_prompt_manager
+
+ def main():
+     parser = argparse.ArgumentParser()
+     parser.add_argument("--label", default="development")
+     args = parser.parse_args()
+
+     settings = get_settings()
+     if not settings.langfuse_enabled:
+         print("Error: LANGFUSE_ENABLED must be true")
+         return 1
+
+     manager = get_prompt_manager(settings)
+     results = manager.push_all(label=args.label)
+
+     for r in results:
+         print(f"✓ {r['name']} → v{r['version']} (label: {r['label']})")
+
+     return 0
+
+ if __name__ == "__main__":
+     exit(main())
+
+ ---
+ DSPy Integration Architecture (Future)
+
+ The architecture supports a future DSPy optimization workflow:
+
+ ┌──────────────────────────────────────────────────────────────────┐
+ │                    DSPy Optimization Flow                        │
+ ├──────────────────────────────────────────────────────────────────┤
+ │  1. COLLECT: LangFuse traces → Export as training dataset        │
+ │              (real examples of prompt usage + outcomes)          │
+ │                                                                  │
+ │  2. OPTIMIZE: DSPy optimizer runs on dataset                     │
+ │              - BootstrapFewShot for few-shot examples           │
+ │              - MIPRO for instruction optimization               │
+ │              - Output: refined prompt text                       │
+ │                                                                  │
+ │  3. PUBLISH: Save optimized prompt to LangFuse                   │
+ │              - Creates new version with "optimized" tag          │
+ │              - A/B test against current production               │
+ │                                                                  │
+ │  4. PROMOTE: After validation, apply "production" label          │
+ │              - nomad-spec prompts promote analysis v3            │
+ └──────────────────────────────────────────────────────────────────┘
+
+ JSON Format Supports DSPy
+
+ Current prompt format already supports future DSPy metadata:
+
+ {
+   "name": "analysis",
+   "type": "chat",
+   "prompt": [{"role": "system", "content": "..."}],
+   "config": {"model": "auto", "temperature": 0.1},
+   "version": 1,
+   "labels": ["development"],
+   "tags": ["nomad"],
+   "dspy_metadata": {
+     "signature": "codebase_content -> analysis_result",
+     "optimized_from": null,
+     "optimization_method": null
+   }
+ }
+
+ Future CLI Commands (Not implemented now)
+
+ # Export traces for DSPy training
+ nomad-spec prompts export-traces --name analysis --output traces.json
+
+ # Run DSPy optimization
+ nomad-spec prompts optimize --name analysis --traces traces.json
+
+ # Promote a version to production
+ nomad-spec prompts promote --name analysis --version 3
+
+ ---
+ Files to Create/Modify
+
+ New Files
+
+ | Path                         | Purpose                | Lines |
+ |------------------------------|------------------------|-------|
+ | scripts/bootstrap_prompts.py | One-time upload script | ~40   |
+
+ Modified Files
+
+ | Path                    | Changes                      | Lines |
+ |-------------------------|------------------------------|-------|
+ | src/prompts/__init__.py | Add push/pull methods        | ~80   |
+ | src/main.py             | Add prompts subcommand group | ~100  |
+ | tests/test_prompts.py   | Add push/pull tests          | ~50   |
+
+ ---
+ Implementation Steps
+
+ 1. Add push/pull methods to PromptManager (src/prompts/__init__.py)
+   - push_prompt(name, label) - upload single prompt
+   - pull_prompt(name, version, label) - download single prompt
+   - push_all(label) - upload all local prompts
+ 2. Add CLI commands (src/main.py)
+   - nomad-spec prompts push [--name] [--label]
+   - nomad-spec prompts pull [--name] [--label]
+   - nomad-spec prompts list
+ 3. Create bootstrap script (scripts/bootstrap_prompts.py)
+ 4. Write tests (tests/test_prompts.py)
+   - Test push/pull with mocked LangFuse client
+
+ ---
+ Usage Workflow
+
+ Initial Setup (Bootstrap)
+
+ # 1. Ensure LangFuse credentials are set
+ export LANGFUSE_ENABLED=true
+ export LANGFUSE_PUBLIC_KEY=pk-lf-...
+ export LANGFUSE_SECRET_KEY=sk-lf-...
+
+ # 2. Push all local prompts to LangFuse
+ nomad-spec prompts push --label development
+
+ # Output:
+ # ✓ analysis → v1 (development)
+ # ✓ generation → v1 (development)
+ # ✓ fix → v1 (development)
+
+ Development Workflow
+
+ # Edit local prompt file
+ vim prompts/analysis.json
+
+ # Push updated prompt (creates new version)
+ nomad-spec prompts push --name analysis
+ # ✓ analysis → v2 (development)
+
+ # Test in development...
+
+ # When ready, push with production label
+ nomad-spec prompts push --name analysis --label production
+ # ✓ analysis → v3 (production)
+
+ Sync from LangFuse
+
+ # Pull latest prompts to local files
+ nomad-spec prompts pull --label production
+
+ # Pull specific version
+ nomad-spec prompts pull --name analysis --version 2
+
+ ---
+ Verification Checklist
+
+ After implementation:
+ - nomad-spec prompts list shows local prompts
+ - nomad-spec prompts push uploads to LangFuse (verify in UI)
+ - nomad-spec prompts pull downloads from LangFuse
+ - Labels applied correctly (development/production)
+ - Local files updated on pull
+ - Existing tests pass
+ - New push/pull tests pass
+
+
+ Here is Claude's plan:
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Prompt Lifecycle Management Plan
+
+ Overview
+
+ This plan adds prompt upload and sync capabilities to complete the LangFuse integration.
+
+ Problem: Local prompts exist in prompts/*.json but LangFuse has no prompts. Need:
+ 1. Bootstrap: Upload local prompts to LangFuse (one-time setup)
+ 2. Sync: CLI commands to push/pull prompts between local and LangFuse
+ 3. Future DSPy: Architecture ready for optimization loops
+
+ Architecture
+
+ ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+ │  Local Files    │◄───►│    LangFuse     │◄───►│     DSPy        │
+ │  prompts/*.json │     │  (runtime       │     │  (future        │
+ │  (version       │     │   source)       │     │   optimization) │
+ │   controlled)   │     │                 │     │                 │
+ └─────────────────┘     └─────────────────┘     └─────────────────┘
+         │                       │                       │
+         │    push               │    get_prompt()       │    optimize
+         │────────────────►      │  ◄────────────────────│
+         │    pull               │    create_prompt()    │
+         │◄────────────────      │  ◄────────────────────│
+
+ Source of Truth Strategy
+
+ | Environment | Primary Source                | Fallback   |
+ |-------------|-------------------------------|------------|
+ | Production  | LangFuse (label: production)  | Local JSON |
+ | Development | LangFuse (label: development) | Local JSON |
+ | CI/Testing  | Local JSON files only         | Hardcoded  |
+
+ Key Principle: Local files are the version-controlled baseline. LangFuse is the runtime source. Changes flow: Local → LangFuse → Runtime.
+
+ ---
+ Implementation
+
+ Phase 1: PromptManager Extensions
+
+ Add push/pull methods to src/prompts/__init__.py (~80 lines):
+
+ def push_prompt(self, name: str, label: str | None = None) -> dict[str, Any]:
+     """Push a local prompt to LangFuse.
+
+     Returns: {"name": str, "version": int, "label": str}
+     """
+     data = self._load_from_file(name)
+     if data is None:
+         raise PromptNotFoundError(f"Local prompt '{name}' not found")
+
+     client = self._get_langfuse_client()
+     if client is None:
+         raise RuntimeError("LangFuse not available")
+
+     use_label = label or self._settings.langfuse_prompt_label
+
+     result = client.create_prompt(
+         name=name,
+         type=data.get("type", "text"),
+         prompt=data.get("prompt"),
+         config=data.get("config", {}),
+         labels=[use_label],
+     )
+
+     return {"name": name, "version": result.version, "label": use_label}
+
+ def pull_prompt(self, name: str, version: int | None = None, label: str | None = None) -> Path:
+     """Pull prompt from LangFuse to local file."""
+     data = self._fetch_from_langfuse(name, version, label)
+     if data is None:
+         raise PromptNotFoundError(f"Prompt '{name}' not found in LangFuse")
+
+     file_path = self._prompts_dir / f"{name}.json"
+     with open(file_path, "w", encoding="utf-8") as f:
+         json.dump(data, f, indent=2)
+     return file_path
+
+ def push_all(self, label: str | None = None) -> list[dict]:
+     """Push all local prompts to LangFuse."""
+     return [self.push_prompt(name, label) for name in self.list_prompts()]
+
+ ---
+ Phase 2: Separate CLI Tool
+
+ Create a new CLI tool nomad-spec-prompt in src/prompt_cli.py (~120 lines).
+
+ Rationale: Keep prompt management separate from nomad-spec because:
+ - nomad-spec is used in other repos to manage their Nomad job specs
+ - nomad-spec-prompt is used to manage the tool itself (its prompts)
+
+ # Push all local prompts to LangFuse
+ nomad-spec-prompt push
+
+ # Push specific prompt
+ nomad-spec-prompt push --name analysis
+
+ # Push with label (default: from LANGFUSE_PROMPT_LABEL)
+ nomad-spec-prompt push --label production
+
+ # Pull all prompts from LangFuse
+ nomad-spec-prompt pull
+
+ # Pull specific prompt
+ nomad-spec-prompt pull --name analysis
+
+ # List prompts (local and LangFuse status)
+ nomad-spec-prompt list
+
+ Implementation in src/prompt_cli.py:
+
+ """CLI for managing LangFuse prompts."""
+
+ import typer
+ from rich.console import Console
+ from rich.table import Table
+
+ from config.settings import get_settings
+ from src.prompts import get_prompt_manager, PromptNotFoundError
+
+ app = typer.Typer(
+     name="nomad-spec-prompt",
+     help="Manage LangFuse prompts for the nomad-spec tool",
+     add_completion=False,
+ )
+ console = Console()
+
+
+ @app.command("push")
+ def push(
+     name: str | None = typer.Option(None, "--name", "-n", help="Specific prompt name"),
+     label: str | None = typer.Option(None, "--label", "-l", help="Label to apply"),
+ ):
+     """Push local prompts to LangFuse."""
+     settings = get_settings()
+     if not settings.langfuse_enabled:
+         console.print("[red]Error:[/red] LANGFUSE_ENABLED must be true")
+         raise typer.Exit(1)
+
+     manager = get_prompt_manager(settings)
+
+     if name:
+         result = manager.push_prompt(name, label)
+         console.print(f"[green]✓[/green] {result['name']} → v{result['version']} ({result['label']})")
+     else:
+         results = manager.push_all(label)
+         for r in results:
+             console.print(f"[green]✓[/green] {r['name']} → v{r['version']} ({r['label']})")
+
+
+ @app.command("pull")
+ def pull(
+     name: str | None = typer.Option(None, "--name", "-n", help="Specific prompt name"),
+     label: str | None = typer.Option(None, "--label", "-l", help="Label to pull"),
+     version: int | None = typer.Option(None, "--version", "-v", help="Specific version"),
+ ):
+     """Pull prompts from LangFuse to local files."""
+     settings = get_settings()
+     if not settings.langfuse_enabled:
+         console.print("[red]Error:[/red] LANGFUSE_ENABLED must be true")
+         raise typer.Exit(1)
+
+     manager = get_prompt_manager(settings)
+
+     if name:
+         path = manager.pull_prompt(name, version, label)
+         console.print(f"[green]✓[/green] {name} → {path}")
+     else:
+         for prompt_name in manager.list_prompts():
+             try:
+                 path = manager.pull_prompt(prompt_name, version, label)
+                 console.print(f"[green]✓[/green] {prompt_name} → {path}")
+             except PromptNotFoundError:
+                 console.print(f"[yellow]![/yellow] {prompt_name} not found in LangFuse")
+
+
+ @app.command("list")
+ def list_prompts():
+     """List available prompts."""
+     manager = get_prompt_manager()
+     table = Table(title="Local Prompts")
+     table.add_column("Name", style="cyan")
+     table.add_column("Type")
+
+     for name in manager.list_prompts():
+         table.add_row(name, "chat")
+
+     console.print(table)
+
+
+ if __name__ == "__main__":
+     app()
+
+ Register in pyproject.toml:
+
+ [project.scripts]
+ nomad-spec = "src.main:app"
+ nomad-spec-prompt = "src.prompt_cli:app"
+
+ ---
+ Phase 3: Bootstrap Script
+
+ Create scripts/bootstrap_prompts.py for one-time setup (~40 lines):
+
+ #!/usr/bin/env python3
+ """Bootstrap: Upload all local prompts to LangFuse.
+
+ Usage:
+     python scripts/bootstrap_prompts.py
+     python scripts/bootstrap_prompts.py --label development
+ """
+ import argparse
+ from config.settings import get_settings
+ from src.prompts import get_prompt_manager
+
+ def main():
+     parser = argparse.ArgumentParser()
+     parser.add_argument("--label", default="development")
+     args = parser.parse_args()
+
+     settings = get_settings()
+     if not settings.langfuse_enabled:
+         print("Error: LANGFUSE_ENABLED must be true")
+         return 1
+
+     manager = get_prompt_manager(settings)
+     results = manager.push_all(label=args.label)
+
+     for r in results:
+         print(f"✓ {r['name']} → v{r['version']} (label: {r['label']})")
+
+     return 0
+
+ if __name__ == "__main__":
+     exit(main())
+
+ ---
+ DSPy Integration Architecture (Future)
+
+ The architecture supports a future DSPy optimization workflow:
+
+ ┌──────────────────────────────────────────────────────────────────┐
+ │                    DSPy Optimization Flow                        │
+ ├──────────────────────────────────────────────────────────────────┤
+ │  1. COLLECT: LangFuse traces → Export as training dataset        │
+ │              (real examples of prompt usage + outcomes)          │
+ │                                                                  │
+ │  2. OPTIMIZE: DSPy optimizer runs on dataset                     │
+ │              - BootstrapFewShot for few-shot examples           │
+ │              - MIPRO for instruction optimization               │
+ │              - Output: refined prompt text                       │
+ │                                                                  │
+ │  3. PUBLISH: Save optimized prompt to LangFuse                   │
+ │              - Creates new version with "optimized" tag          │
+ │              - A/B test against current production               │
+ │                                                                  │
+ │  4. PROMOTE: After validation, apply "production" label          │
+ │              - nomad-spec prompts promote analysis v3            │
+ └──────────────────────────────────────────────────────────────────┘
+
+ JSON Format Supports DSPy
+
+ Current prompt format already supports future DSPy metadata:
+
+ {
+   "name": "analysis",
+   "type": "chat",
+   "prompt": [{"role": "system", "content": "..."}],
+   "config": {"model": "auto", "temperature": 0.1},
+   "version": 1,
+   "labels": ["development"],
+   "tags": ["nomad"],
+   "dspy_metadata": {
+     "signature": "codebase_content -> analysis_result",
+     "optimized_from": null,
+     "optimization_method": null
+   }
+ }
+
+ Future CLI Commands (Not implemented now)
+
+ # Export traces for DSPy training
+ nomad-spec prompts export-traces --name analysis --output traces.json
+
+ # Run DSPy optimization
+ nomad-spec prompts optimize --name analysis --traces traces.json
+
+ # Promote a version to production
+ nomad-spec prompts promote --name analysis --version 3
+
+ ---
+ Files to Create/Modify
+
+ New Files
+
+ | Path                         | Purpose                                     | Lines |
+ |------------------------------|---------------------------------------------|-------|
+ | src/prompt_cli.py            | Separate CLI tool for prompt management     | ~120  |
+ | scripts/bootstrap_prompts.py | One-time upload script (optional, uses CLI) | ~40   |
+
+ Modified Files
+
+ | Path                    | Changes                                | Lines |
+ |-------------------------|----------------------------------------|-------|
+ | src/prompts/__init__.py | Add push/pull methods                  | ~80   |
+ | pyproject.toml          | Register nomad-spec-prompt entry point | ~3    |
+ | tests/test_prompts.py   | Add push/pull tests                    | ~50   |
+
+ ---
+ Implementation Steps
+
+ 1. Add push/pull methods to PromptManager (src/prompts/__init__.py)
+   - push_prompt(name, label) - upload single prompt
+   - pull_prompt(name, version, label) - download single prompt
+   - push_all(label) - upload all local prompts
+ 2. Create separate CLI tool (src/prompt_cli.py)
+   - nomad-spec-prompt push [--name] [--label]
+   - nomad-spec-prompt pull [--name] [--label] [--version]
+   - nomad-spec-prompt list
+ 3. Register CLI entry point (pyproject.toml)
+   - Add nomad-spec-prompt = "src.prompt_cli:app" to [project.scripts]
+ 4. Write tests (tests/test_prompts.py)
+   - Test push/pull with mocked LangFuse client
+
+ ---
+ Usage Workflow
+
+ Initial Setup (Bootstrap)
+
+ # 1. Ensure LangFuse credentials are set in .env
+ LANGFUSE_ENABLED=true
+ LANGFUSE_PUBLIC_KEY=pk-lf-...
+ LANGFUSE_SECRET_KEY=sk-lf-...
+
+ # 2. Install the tool (registers both CLIs)
+ pip install -e .
+
+ # 3. Push all local prompts to LangFuse
+ nomad-spec-prompt push --label development
+
+ # Output:
+ # ✓ analysis → v1 (development)
+ # ✓ generation → v1 (development)
+ # ✓ fix → v1 (development)
+
+ Development Workflow
+
+ # Edit local prompt file
+ vim prompts/analysis.json
+
+ # Push updated prompt (creates new version)
+ nomad-spec-prompt push --name analysis
+ # ✓ analysis → v2 (development)
+
+ # Test in development...
+
+ # When ready, push with production label
+ nomad-spec-prompt push --name analysis --label production
+ # ✓ analysis → v3 (production)
+
+ Sync from LangFuse
+
+ # Pull latest prompts to local files
+ nomad-spec-prompt pull --label production
+
+ # Pull specific version
+ nomad-spec-prompt pull --name analysis --version 2
+
+ ---
+ Verification Checklist
+
+ After implementation:
+ - nomad-spec-prompt list shows local prompts
+ - nomad-spec-prompt push uploads to LangFuse (verify in UI)
+ - nomad-spec-prompt pull downloads from LangFuse
+ - Labels applied correctly (development/production)
+ - Local files updated on pull
+ - Existing tests pass
+ - New push/pull tests pass
+
+Implementation complete. Here's a summary:
+
+  Created/Modified Files
+
+  | File                    | Change                                                 |
+  |-------------------------|--------------------------------------------------------|
+  | src/prompts/__init__.py | Added push_prompt(), pull_prompt(), push_all() methods |
+  | src/prompt_cli.py       | New - Separate CLI tool with push, pull, list commands |
+  | pyproject.toml          | Added nomad-spec-prompt entry point                    |
+  | tests/test_prompts.py   | Added 8 new tests for push/pull functionality          |
+
+  Usage
+
+  # List local prompts
+  nomad-spec-prompt list
+
+  # Push all prompts to LangFuse
+  nomad-spec-prompt push
+
+  # Push single prompt with specific label
+  nomad-spec-prompt push --name analysis --label production
+
+  # Pull prompts from LangFuse
+  nomad-spec-prompt pull --label development
+
+  Test Results
+
+  - All 140 tests pass
+  - 8 new tests added for push/pull methods
+
+  Would you like me to:
+  1. Push the prompts to your LangFuse instance now (requires LANGFUSE_ENABLED=true)?
+  2. Commit these changes?
+  3. Create the optional bootstrap script (scripts/bootstrap_prompts.py)?
+
+Here is Claude's plan:
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Plan: Move Graph Nodes to Individual Files
+
+ Goal
+
+ Refactor src/graph.py so all graph nodes are implemented in their own files under src/nodes/, following the existing patterns.
+
+ Current State
+
+ | Node     | Current Location      | Target Location       |
+ |----------|-----------------------|-----------------------|
+ | analyze  | src/nodes/analyze.py  | (no change)           |
+ | enrich   | src/nodes/enrich.py   | (no change)           |
+ | question | src/graph.py:118-194  | src/nodes/question.py |
+ | collect  | src/graph.py:197-203  | src/nodes/question.py |
+ | generate | src/nodes/generate.py | (no change)           |
+ | validate | src/nodes/validate.py | (no change)           |
+ | deploy   | src/graph.py:337-343  | src/nodes/deploy.py   |
+ | verify   | src/graph.py:346-351  | src/nodes/deploy.py   |
+ | fix      | src/nodes/generate.py | (no change)           |
+
+ Implementation Steps
+
+ Step 1: Create src/nodes/question.py
+
+ Move from src/graph.py:
+ - generate_questions_node (lines 118-194)
+ - collect_responses_node (lines 197-203)
+
+ Create factory functions:
+ - create_question_node() - wraps generate_questions_node
+ - create_collect_node() - wraps collect_responses_node
+
+ Step 2: Create src/nodes/deploy.py
+
+ Move from src/graph.py:
+ - _deploy_stub (lines 337-343) → rename to deploy_node
+ - _verify_stub (lines 346-351) → rename to verify_node
+
+ Create factory functions:
+ - create_deploy_node(settings) - wraps deploy_node
+ - create_verify_node(settings) - wraps verify_node
+
+ Note: Keep should_retry and _is_unfixable_error in graph.py as routing logic.
+
+ Step 3: Update src/nodes/__init__.py
+
+ Current exports only include analyze and generate. Add exports for new modules:
+ from src.nodes.question import create_question_node, create_collect_node
+ from src.nodes.deploy import create_deploy_node, create_verify_node
+ Add to __all__:
+ - create_question_node, create_collect_node
+ - create_deploy_node, create_verify_node
+
+ Step 4: Update src/graph.py
+
+ - Remove moved node implementations
+ - Import new factory functions from src.nodes
+ - Update create_workflow() to use imported factory functions
+
+ Files to Modify
+
+ 1. Create: src/nodes/question.py
+ 2. Create: src/nodes/deploy.py
+ 3. Edit: src/nodes/__init__.py
+ 4. Edit: src/graph.py
+
+ Pattern to Follow
+
+ Based on existing nodes (analyze.py, enrich.py, generate.py, validate.py):
+
+ """Node docstring."""
+ import logging
+ from typing import Any
+ from config.settings import Settings, get_settings
+
+ logger = logging.getLogger(__name__)
+
+ def node_function(state: dict[str, Any]) -> dict[str, Any]:
+     """Node implementation."""
+     # Extract from state
+     # Process
+     # Return {**state, "new_fields": values}
+
+ def create_node_function(settings: Settings | None = None):
+     """Factory function for LangGraph integration."""
+     if settings is None:
+         settings = get_settings()
+
+     def node(state: dict[str, Any]) -> dict[str, Any]:
+         return node_function(state)
+
+     return node
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+
+ Would you like to proceed?
+
+
+ Based on my investigation, I've found how the Dockerfile detection works in the Nomad Job Spec tool:
+
+   1. Dockerfile Discovery Process:
+      - The tool scans the entire codebase for files named "Dockerfile*" (including variations like Dockerfile.prod, Dockerfile.dev, etc.)
+      - It uses path.glob("**/Dockerfile*") to find all Dockerfile variants
+      - It filters out directories, backup files, documentation files, and common non-source directories (node_modules, .git, vendor, __pycache__)
+      - It sorts Dockerfiles with preference for the root Dockerfile first
+
+   2. How It Finds Dockerfiles:
+      - In src/tools/codebase.py, the analyze_codebase function is responsible for finding Dockerfiles
+      - The function looks for all files that start with "Dockerfile" anywhere in the codebase
+      - It prioritizes the root Dockerfile (if present) over others
+
+   3. Selection Process:
+      - In src/main.py, the _collect_deployment_prompt function handles Dockerfile selection
+      - If multiple Dockerfiles are found, it presents them to the user for selection
+      - If only one Dockerfile is found, it automatically selects it
+      - It constructs a default prompt referencing the selected Dockerfile
+
+  The tool doesn't rely on a specific "Dockerfile" file in a particular location - it scans the entire codebase for any file that matches the
+  Dockerfile naming convention. This explains why you might not see a specific "Dockerfile" reference in the telemetry traces, as the tool is
+  scanning for Dockerfiles in the codebase rather than reading a specific file.
+
+  The process is:
+   1. Scan the codebase for Dockerfile variants
+   2. Present options to user if multiple found
+   3. Select the appropriate Dockerfile for deployment
+   4. Use that Dockerfile information to generate the Nomad job specification
+
+  This approach allows the tool to work with projects that might have multiple Dockerfiles for different environments or purposes.
+
+
+● I've instrumented all tool calls with LangFuse tracing. Here's a summary of the changes:
+
+  Summary of Changes
+
+  1. Enhanced Observability Module (src/observability/__init__.py)
+
+  - Added span() context manager for creating nested spans within traces
+  - Added traced() decorator for automatic function tracing
+  - Added _NoOpSpan class for graceful degradation when LangFuse is unavailable
+
+  2. Instrumented Codebase Analysis (src/tools/codebase.py)
+
+  - Added trace for analyze_codebase function with spans for:
+    - find_dockerfiles - discovering Dockerfile variants
+    - parse_dockerfile - parsing Dockerfile content
+    - detect_language_and_deps - detecting language and dependencies
+    - detect_env_vars - detecting environment variables
+    - suggest_resources - suggesting resource allocations
+    - clone_repository - cloning git repositories (if applicable)
+
+  3. Instrumented Node Functions
+
+  - analyze node (src/nodes/analyze.py): Added tracing for static analysis, LLM analysis, and merge operations
+  - enrich node (src/nodes/enrich.py): Added spans for all infrastructure calls:
+    - init_vault_client, init_consul_client, init_fabio_client
+    - load_conventions, set_vault_conventions
+    - suggest_env_configs, suggest_vault_mappings
+    - query_consul_services, validate_fabio_routes
+    - get_nomad_version
+  - generate node (src/nodes/generate.py): Added tracing for context building, LLM invocation, response parsing, HCL generation, and validation
+  - fix node (src/nodes/generate.py): Added tracing for fix iterations
+  - validate node (src/nodes/validate.py): Added tracing for Fabio route validation, Vault path validation, and HCL syntax checks
+
+  What You'll Now See in LangFuse
+
+  When you run the program, you should see multiple traces in LangFuse:
+  1. analyze_codebase - with nested spans for each analysis step
+  2. analyze_node - wrapping static and LLM analysis
+  3. enrich_node - with spans for each infrastructure query
+  4. generate_node - with spans for generation steps
+  5. validate_node - with spans for validation checks
+
+  Each trace/span includes:
+  - Input: Parameters passed to the operation
+  - Output: Results including counts, statuses, and key data
+  - Level: ERROR or WARNING for failed operations
+  - Status Message: Error details when operations fail
+
+
+ Done! Committed as 95b7060. Now the trace structure should be:
+
+  analyze_node (trace)
+  ├── static_analysis (span)
+  │   ├── find_dockerfiles (span)
+  │   ├── parse_dockerfile (span)
+  │   ├── detect_language_and_deps (span)
+  │   ├── detect_env_vars (span)
+  │   └── suggest_resources (span)
+  ├── llm_analysis (span)
+  └── merge_analyses (span)
+
+  Each LangGraph node creates one trace with its name, and tool operations become nested spans under it. The same pattern can be applied to other nodes (enrich,
+   generate, etc.) if you want their tool calls to also show as nested spans.
+
+
+
+   Here is Claude's plan:
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Plan: Dockerfile Selection Before Analysis
+
+ Problem
+
+ Currently, analysis completes before asking which Dockerfile to use. This means analysis results (base image, ports, env vars, resources) are based on the
+ auto-selected "first" Dockerfile, not the user's choice.
+
+ Solution
+
+ Insert Dockerfile discovery and selection before analysis:
+
+ Current:  START -> analyze -> enrich -> question -> collect -> ...
+ Proposed: START -> discover -> [select] -> analyze -> enrich -> question -> collect -> ...
+
+ - discover: Lightweight - finds Dockerfile paths only (no parsing)
+ - select: Interrupt point for user to choose (skipped if only 1 Dockerfile)
+ - analyze: Modified to use the selected Dockerfile
+
+ ---
+ Files to Modify
+
+ 1. src/nodes/discover.py (NEW FILE)
+
+ Create new node with:
+ - discover_dockerfiles_node() - finds all Dockerfiles, auto-selects if only one
+ - select_dockerfile_node() - pass-through node for interrupt
+ - should_select_dockerfile() - conditional edge function (returns "select" or "skip")
+ - Factory functions create_discover_node() and create_select_node()
+
+ 2. src/graph.py
+
+ - Add state fields to AgentState: dockerfiles_found: list[str], selected_dockerfile: str | None
+ - Update create_initial_state() to initialize new fields
+ - Add imports for new nodes
+ - Update create_workflow():
+   - Add discover and select nodes
+   - Add START -> discover edge
+   - Add conditional edge from discover (select vs skip)
+   - Add select -> analyze edge
+ - Update compile_graph(): change interrupt_before=["collect"] to interrupt_before=["select", "collect"]
+
+ 3. src/tools/codebase.py
+
+ - Add selected_dockerfile: str | None = None parameter to analyze_codebase()
+ - Modify Dockerfile parsing (lines 428-442) to use selected Dockerfile instead of auto-selecting first
+
+ 4. src/nodes/analyze.py
+
+ - Update tool call (line 136) to pass selected_dockerfile from state to analyze_codebase_tool()
+
+ 5. src/main.py
+
+ - Add _collect_dockerfile_selection(state) function for Rich UI selection
+ - Update execution flow to:
+   a. Stream until first interrupt (Dockerfile selection)
+   b. If multiple Dockerfiles and none selected, call _collect_dockerfile_selection()
+   c. Update state with selection via graph.update_state()
+   d. Continue streaming to next interrupt (questions)
+ - Remove Dockerfile selection logic from _collect_deployment_prompt() (lines 576-612)
+
+ 6. src/nodes/__init__.py
+
+ - Export new node functions
+
+ ---
+ State Flow
+
+ INITIAL:           dockerfiles_found=[], selected_dockerfile=None
+ AFTER discover:    dockerfiles_found=["Dockerfile", "docker/Dockerfile.prod"], selected_dockerfile=None
+ CLI UPDATE:        graph.update_state(config, {"selected_dockerfile": "docker/Dockerfile.prod"})
+ AFTER analyze:     codebase_analysis.dockerfile reflects Dockerfile.prod
+
+ Edge Cases
+
+ - No Dockerfiles: Discovery continues, analysis proceeds without Docker info
+ - Single Dockerfile: Auto-selected, conditional edge skips selection interrupt
+ - --no-questions mode: Skip selection interrupt, use first found
+
+Implementation complete. Here's a summary of what was changed:
+
+  Summary
+
+  New File:
+  - src/nodes/discover.py - New discovery and selection nodes
+
+  Modified Files:
+  - src/graph.py - Added state fields (dockerfiles_found, selected_dockerfile), new nodes, conditional edge, updated interrupt points
+  - src/tools/codebase.py - Added selected_dockerfile parameter to analyze_codebase()
+  - src/nodes/analyze.py - Passes selected Dockerfile from state to the tool
+  - src/main.py - Added _collect_dockerfile_selection() UI function, updated execution flow to handle new interrupt
+  - src/nodes/__init__.py - Exported new node functions
+
+  New Workflow
+
+  START → discover → [select] → analyze → enrich → question → collect → ...
+
+  The select node is skipped via conditional edge when:
+  - Only 1 Dockerfile exists (auto-selected)
+  - No Dockerfiles found
+
+  When multiple Dockerfiles exist:
+  1. Graph interrupts before select node
+  2. CLI displays numbered list of Dockerfiles
+  3. User picks one
+  4. State is updated with selection
+  5. Analysis runs using the selected Dockerfile
+
+  All 140 tests pass.
+
+● All fixes are complete. Here's what was changed:
+
+  Summary of Fixes
+
+  Issue 1: Dockerfile Selection Flow
+  - src/nodes/discover.py: Removed auto-selection for single Dockerfile (lines 96-100)
+  - src/nodes/discover.py: Updated should_select_dockerfile() to return "select" when any Dockerfiles exist
+  - src/main.py: Updated _collect_dockerfile_selection() to show confirmation for single Dockerfile ("Use this Dockerfile? [y/n]")
+  - src/main.py: Simplified main flow to always require selection when Dockerfiles exist
+
+  Issue 2: Duplicate Vault Block
+  - src/tools/hcl.py: Made standalone vault block conditional - skips when using native env stanza (lines 362-372)
+  - src/tools/hcl.py: Updated _build_vault_env_stanza() to include policies = [...] in the vault block
+
+  New Flow:
+  1. Discover Dockerfiles
+  2. If any found → Prompt user to confirm/select BEFORE analysis
+  3. Analyze codebase using selected Dockerfile
+  4. Continue with questions, generation, etc.
+
+  All 140 tests pass.
+
+ Plan: Fix Dockerfile Selection State Propagation
+
+ Issue 1: Analysis is Empty After Dockerfile Confirmation
+
+ Root Cause
+
+ The graph.update_state() call needs the as_node parameter to properly associate the state update with the correct checkpoint position. Without it, the state may
+ not flow correctly to subsequent nodes.
+
+ Fix
+
+ Add as_node="select" to the state update call. Since we interrupted before "select" and are providing the user's selection (which is what the "select" node
+ conceptually handles), this associates the update with the select node's output.
+
+ File: src/main.py (line 182)
+ # Before:
+ graph.update_state(config, {"selected_dockerfile": selected})
+
+ # After:
+ graph.update_state(config, {"selected_dockerfile": selected}, as_node="select")
+
+ ---
+ Issue 2: Remove Redundant Deployment Prompt
+
+ Problem
+
+ After confirming Dockerfile, user is asked:
+ What would you like to deploy? (Deploy the Docker image defined in Dockerfile):
+
+ This is redundant since Dockerfile confirmation already establishes what to deploy.
+
+ Fix
+
+ Remove the interactive prompt. Auto-generate the prompt based on the selected Dockerfile.
+
+ File: src/main.py (lines 200-212)
+ # Before:
+ if not prompt and not no_questions:
+     prompt = _collect_deployment_prompt(analysis, selected_dockerfile)
+     graph.update_state(config, {"prompt": prompt})
+     # Show configuration panel...
+
+ # After:
+ if not prompt:
+     selected_dockerfile = current_state.values.get("selected_dockerfile")
+     prompt = f"Deploy using {selected_dockerfile}" if selected_dockerfile else "Deploy this application"
+     graph.update_state(config, {"prompt": prompt})
+
+ Also remove _collect_deployment_prompt() function (lines 613-661) - it's no longer needed.
+
+ ---
+ Files to Modify
+
+ src/main.py
+
+ 1. Line 182: Add as_node="select" to graph.update_state() call
+ 2. Lines 200-212: Replace interactive prompt collection with auto-generation
+ 3. Lines 613-661: Delete _collect_deployment_prompt() function
+
+● All fixes implemented:
+
+  1. State propagation fix (src/main.py:182): Added as_node="select" to properly checkpoint the user's Dockerfile selection so the analyze node receives it
+  2. Removed redundant prompt (src/main.py:200-203): Replaced interactive _collect_deployment_prompt() call with auto-generated prompt based on selected
+  Dockerfile
+  3. Deleted unused function (src/main.py): Removed _collect_deployment_prompt() function (was lines 604-652)
+
+  The workflow now:
+  - Discovers Dockerfiles
+  - Asks user to confirm/select Dockerfile
+  - Auto-generates prompt like "Deploy using Dockerfile"
+  - Proceeds directly to analysis and questions
+
+  You can test with:
+  nomad-spec generate --path /path/to/codebase
 

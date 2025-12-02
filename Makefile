@@ -47,6 +47,7 @@ install:
 	$(PIP) install .
 
 install-dev:
+	find . -type d -name __pycache__ -exec rm -rf {} +
 	$(PIP) install -e ".[dev]"
 
 # ================================
