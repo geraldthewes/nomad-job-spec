@@ -15,6 +15,7 @@ from rich.table import Table
 from config.settings import get_settings
 from src.llm.provider import get_llm
 from src.graph import compile_graph, create_initial_state
+from src.observability import get_observability
 from src.tools.infra_status import InfraHealthReport, check_infrastructure_from_settings
 
 app = typer.Typer(
@@ -80,6 +81,15 @@ def generate(
     """
     settings = get_settings()
 
+    # Initialize observability
+    obs = get_observability(settings)
+    if obs.is_enabled():
+        console.print("[dim]LangFuse tracing enabled[/dim]")
+
+    # Generate session ID for trace grouping
+    import time
+    session_id = f"session-{cluster_id}-{int(time.time())}"
+
     # Validate path
     codebase_path = Path(path)
     is_git_url = path.startswith(("http://", "https://", "git@"))
@@ -135,6 +145,7 @@ def generate(
         settings=settings,
         include_deployment=not dry_run,
         enable_checkpointing=not no_questions,
+        session_id=session_id,
     )
 
     # Create initial state (prompt may be empty, will be collected interactively)
@@ -206,6 +217,9 @@ def generate(
         if verbose:
             console.print_exception()
         raise typer.Exit(code=1)
+    finally:
+        # Flush any pending traces
+        obs.flush()
 
     # Display results
     _display_results(result, output, verbose)

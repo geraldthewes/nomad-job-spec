@@ -1,6 +1,7 @@
 """Codebase analysis node for the LangGraph workflow."""
 
 import json
+import logging
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -12,8 +13,11 @@ from src.tools.codebase import (
     get_relevant_files_content,
 )
 
+logger = logging.getLogger(__name__)
 
-ANALYSIS_SYSTEM_PROMPT = """You are an expert DevOps engineer analyzing a codebase for deployment to HashiCorp Nomad.
+
+# Fallback prompt used when LangFuse and local file are unavailable
+_FALLBACK_ANALYSIS_PROMPT = """You are an expert DevOps engineer analyzing a codebase for deployment to HashiCorp Nomad.
 
 Your task is to analyze the provided codebase information and extract deployment-relevant details.
 
@@ -70,6 +74,27 @@ Important cluster-specific notes:
 - Stateful services need CSI volumes with init tasks for permissions
 - Use dynamic ports (not static) unless absolutely necessary
 """
+
+
+def _get_analysis_prompt() -> str:
+    """Get the analysis system prompt.
+
+    Tries LangFuse first, falls back to local file, then hardcoded default.
+
+    Returns:
+        The analysis system prompt string.
+    """
+    try:
+        from src.prompts import get_prompt_manager, PromptNotFoundError
+
+        manager = get_prompt_manager()
+        return manager.get_prompt_text("analysis")
+    except PromptNotFoundError:
+        logger.warning("Analysis prompt not found, using fallback")
+        return _FALLBACK_ANALYSIS_PROMPT
+    except Exception as e:
+        logger.warning(f"Failed to get analysis prompt: {e}, using fallback")
+        return _FALLBACK_ANALYSIS_PROMPT
 
 
 def analyze_codebase_node(
@@ -156,9 +181,12 @@ def _perform_llm_analysis(
 
     context = "\n".join(context_parts)
 
+    # Get the analysis prompt
+    analysis_prompt = _get_analysis_prompt()
+
     # Query LLM
     messages = [
-        SystemMessage(content=ANALYSIS_SYSTEM_PROMPT),
+        SystemMessage(content=analysis_prompt),
         HumanMessage(content=f"Analyze this codebase for Nomad deployment:\n\n{context}"),
     ]
 

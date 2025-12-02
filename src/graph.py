@@ -356,6 +356,7 @@ def compile_graph(
     settings: Settings | None = None,
     include_deployment: bool = True,
     enable_checkpointing: bool = True,
+    session_id: str | None = None,
 ):
     """Compile the workflow graph for execution.
 
@@ -364,10 +365,26 @@ def compile_graph(
         settings: Application settings.
         include_deployment: Whether to include deployment nodes.
         enable_checkpointing: Whether to enable state checkpointing for HitL.
+        session_id: Optional session ID for LangFuse trace grouping.
 
     Returns:
         Compiled graph ready for execution.
     """
+    if settings is None:
+        settings = get_settings()
+
+    # Wire up LangFuse callbacks to LLM if enabled
+    from src.observability import get_observability
+
+    obs = get_observability(settings)
+    if obs.is_enabled():
+        handler = obs.get_handler(
+            trace_name="nomad-job-spec",
+            session_id=session_id,
+        )
+        if handler:
+            llm = llm.with_config(callbacks=[handler])
+
     workflow = create_workflow(llm, settings, include_deployment)
 
     if enable_checkpointing:

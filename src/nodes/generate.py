@@ -1,6 +1,7 @@
 """HCL spec generation node for the LangGraph workflow."""
 
 import json
+import logging
 import re
 from typing import Any
 
@@ -20,8 +21,11 @@ from src.tools.hcl import (
 )
 from config.settings import get_settings
 
+logger = logging.getLogger(__name__)
 
-GENERATION_SYSTEM_PROMPT = """You are an expert DevOps engineer generating HashiCorp Nomad job specifications.
+
+# Fallback prompt used when LangFuse and local file are unavailable
+_FALLBACK_GENERATION_PROMPT = """You are an expert DevOps engineer generating HashiCorp Nomad job specifications.
 
 Your task is to generate a valid Nomad job configuration based on the provided codebase analysis and user requirements.
 
@@ -101,6 +105,65 @@ Important:
 """
 
 
+# Fallback fix prompt used when LangFuse and local file are unavailable
+_FALLBACK_FIX_PROMPT = """You are an expert DevOps engineer fixing a failed Nomad job deployment.
+
+The previous job specification failed to deploy. Your task is to analyze the error and generate a corrected job configuration.
+
+Common fixes:
+- "insufficient memory" -> increase memory allocation
+- "port already in use" -> use dynamic ports (remove 'static' port binding)
+- "image not found" -> verify image name and tag
+- "constraint not satisfied" -> adjust datacenter or remove constraints
+- "permission denied" -> check volume mount permissions and owner UID
+- "health check failed" -> verify health check path and increase timeout
+
+Output ONLY a valid JSON object with the fixed job configuration using the same structure as the generation prompt.
+"""
+
+
+def _get_generation_prompt() -> str:
+    """Get the generation system prompt.
+
+    Tries LangFuse first, falls back to local file, then hardcoded default.
+
+    Returns:
+        The generation system prompt string.
+    """
+    try:
+        from src.prompts import get_prompt_manager, PromptNotFoundError
+
+        manager = get_prompt_manager()
+        return manager.get_prompt_text("generation")
+    except PromptNotFoundError:
+        logger.warning("Generation prompt not found, using fallback")
+        return _FALLBACK_GENERATION_PROMPT
+    except Exception as e:
+        logger.warning(f"Failed to get generation prompt: {e}, using fallback")
+        return _FALLBACK_GENERATION_PROMPT
+
+
+def _get_fix_prompt() -> str:
+    """Get the fix system prompt.
+
+    Tries LangFuse first, falls back to local file, then hardcoded default.
+
+    Returns:
+        The fix system prompt string.
+    """
+    try:
+        from src.prompts import get_prompt_manager, PromptNotFoundError
+
+        manager = get_prompt_manager()
+        return manager.get_prompt_text("fix")
+    except PromptNotFoundError:
+        logger.warning("Fix prompt not found, using fallback")
+        return _FALLBACK_FIX_PROMPT
+    except Exception as e:
+        logger.warning(f"Failed to get fix prompt: {e}, using fallback")
+        return _FALLBACK_FIX_PROMPT
+
+
 def generate_spec_node(
     state: dict[str, Any],
     llm: BaseChatModel,
@@ -142,9 +205,12 @@ def generate_spec_node(
         env_var_configs=confirmed_env_configs,
     )
 
+    # Get the generation prompt
+    generation_prompt = _get_generation_prompt()
+
     # Query LLM for configuration
     messages = [
-        SystemMessage(content=GENERATION_SYSTEM_PROMPT),
+        SystemMessage(content=generation_prompt),
         HumanMessage(content=context),
     ]
 
@@ -561,8 +627,11 @@ Common fixes:
 Output ONLY a valid JSON object with the fixed job configuration.
 """
 
+    # Get the fix system prompt
+    fix_system_prompt = _get_fix_prompt()
+
     messages = [
-        SystemMessage(content=GENERATION_SYSTEM_PROMPT),
+        SystemMessage(content=fix_system_prompt),
         HumanMessage(content=fix_prompt),
     ]
 

@@ -178,19 +178,40 @@ def get_llm(settings: Settings | None = None) -> BaseChatModel:
 def get_llm_with_callbacks(
     callbacks: list[Any] | None = None,
     settings: Settings | None = None,
+    trace_name: str | None = None,
+    session_id: str | None = None,
 ) -> BaseChatModel:
     """Get the configured LLM instance with callbacks.
 
-    Use this when you need tracing or other callbacks.
+    Use this when you need tracing or other callbacks. If no callbacks
+    are provided and LangFuse is enabled, automatically adds the
+    LangFuse callback handler.
 
     Args:
         callbacks: List of LangChain callbacks (e.g., LangFuse handler).
         settings: Application settings. If None, uses default settings.
+        trace_name: Optional trace name for LangFuse.
+        session_id: Optional session ID for LangFuse trace grouping.
 
     Returns:
         LangChain-compatible LLM instance with callbacks configured.
     """
+    if settings is None:
+        settings = get_settings()
+
     llm = get_llm(settings)
-    if callbacks:
-        return llm.with_config(callbacks=callbacks)
+
+    all_callbacks = list(callbacks) if callbacks else []
+
+    # Add LangFuse handler if enabled and no explicit callbacks provided
+    if not callbacks:
+        from src.observability import get_observability
+
+        obs = get_observability(settings)
+        handler = obs.get_handler(trace_name=trace_name, session_id=session_id)
+        if handler:
+            all_callbacks.append(handler)
+
+    if all_callbacks:
+        return llm.with_config(callbacks=all_callbacks)
     return llm

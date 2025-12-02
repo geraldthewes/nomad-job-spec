@@ -14,6 +14,22 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
 @pytest.fixture
+def reset_singletons():
+    """Reset all global singletons before and after tests.
+
+    Use this fixture when testing modules that use global state.
+    """
+    from src.observability import reset_observability
+    from src.prompts import reset_prompt_manager
+
+    reset_observability()
+    reset_prompt_manager()
+    yield
+    reset_observability()
+    reset_prompt_manager()
+
+
+@pytest.fixture
 def sample_repos_dir():
     """Return path to sample repos fixture directory."""
     return FIXTURES_DIR / "sample_repos"
