@@ -197,7 +197,7 @@ def check_nomad_health(
         )
 
         # Try to get agent info - this validates connectivity
-        agent_info = client.agent.self()
+        agent_info = client.agent.get_agent()
 
         # Check if we got valid data
         if not agent_info or "config" not in agent_info:

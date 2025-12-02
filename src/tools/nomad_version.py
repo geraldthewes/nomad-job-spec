@@ -134,7 +134,7 @@ def get_nomad_version(
         )
 
         # Get agent info which includes version
-        agent_info = client.agent.self()
+        agent_info = client.agent.get_agent()
         version_string = agent_info.get("config", {}).get("Version", "1.0.0")
 
         return NomadVersion.parse(version_string)
