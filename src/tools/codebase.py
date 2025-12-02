@@ -356,12 +356,14 @@ def suggest_resources(dockerfile_info: DockerfileInfo | None, deps: DependencyIn
 
 def analyze_codebase(
     codebase_path: str,
+    selected_dockerfile: str | None = None,
     parent_span: "(_SpanWrapper | _NoOpSpan | None)" = None,
 ) -> CodebaseAnalysis:
     """Perform complete analysis of a codebase for Nomad deployment.
 
     Args:
         codebase_path: Path to the codebase (local or will be cloned if URL).
+        selected_dockerfile: Specific Dockerfile to parse. If None, uses first found.
         parent_span: Optional parent span from the calling node. When provided,
             tool operations are recorded as child spans under it.
 
@@ -425,13 +427,21 @@ def analyze_codebase(
         analysis.dockerfiles_found = dockerfiles_found
         span.end(output={"dockerfiles_found": dockerfiles_found, "count": len(dockerfiles_found)})
 
-    # Parse the primary (first) Dockerfile for analysis
+    # Parse the selected (or first) Dockerfile for analysis
     if dockerfiles_found:
-        primary_dockerfile = path / dockerfiles_found[0]
-        with create_span("parse_dockerfile", input={"dockerfile": dockerfiles_found[0]}) as span:
+        # Use selected dockerfile if provided, otherwise use first found
+        dockerfile_to_parse = selected_dockerfile if selected_dockerfile else dockerfiles_found[0]
+
+        # Validate selection exists in found list
+        if dockerfile_to_parse not in dockerfiles_found:
+            analysis.errors.append(f"Selected Dockerfile '{dockerfile_to_parse}' not found")
+            dockerfile_to_parse = dockerfiles_found[0]
+
+        primary_dockerfile = path / dockerfile_to_parse
+        with create_span("parse_dockerfile", input={"dockerfile": dockerfile_to_parse}) as span:
             try:
                 analysis.dockerfile = parse_dockerfile(str(primary_dockerfile))
-                files_analyzed.append(dockerfiles_found[0])
+                files_analyzed.append(dockerfile_to_parse)
                 span.end(output={
                     "base_image": analysis.dockerfile.base_image,
                     "exposed_ports": analysis.dockerfile.exposed_ports,

@@ -131,14 +131,17 @@ def analyze_codebase_node(
         }
 
     # Step 1: Static analysis - pass span so tool creates child spans under it
-    with obs.span("static_analysis", trace=trace, input={"path": codebase_path}) as span:
+    selected_dockerfile = state.get("selected_dockerfile")
+    with obs.span("static_analysis", trace=trace, input={"path": codebase_path, "selected_dockerfile": selected_dockerfile}) as span:
         try:
             static_analysis: CodebaseAnalysis = analyze_codebase_tool(
                 codebase_path,
+                selected_dockerfile=selected_dockerfile,
                 parent_span=span,
             )
             span.end(output={
                 "dockerfiles_found": len(static_analysis.dockerfiles_found),
+                "selected_dockerfile": selected_dockerfile,
                 "language": static_analysis.dependencies.language if static_analysis.dependencies else None,
                 "env_vars_count": len(static_analysis.env_vars_required),
             })

@@ -160,9 +160,30 @@ def generate(
     config = {"configurable": {"thread_id": f"session-{cluster_id}"}}
 
     try:
-        # First run - analyze and generate questions
-        with console.status("[bold green]Analyzing codebase..."):
+        # First run - discover Dockerfiles
+        with console.status("[bold green]Discovering Dockerfiles..."):
             for event in graph.stream(state, config):
+                if verbose:
+                    _print_event(event)
+
+                # Check for interrupt (Dockerfile selection or questions ready)
+                if "__interrupt__" in event:
+                    break
+
+        # Get current state to check if Dockerfile selection is needed
+        current_state = graph.get_state(config)
+        dockerfiles = current_state.values.get("dockerfiles_found", [])
+        selected = current_state.values.get("selected_dockerfile")
+
+        # Handle Dockerfile selection/confirmation if needed
+        if dockerfiles and not selected and not no_questions:
+            selected = _collect_dockerfile_selection(current_state.values)
+            if selected:
+                graph.update_state(config, {"selected_dockerfile": selected})
+
+        # Continue to analysis (whether selection was made or skipped)
+        with console.status("[bold green]Analyzing codebase..."):
+            for event in graph.stream(None, config):
                 if verbose:
                     _print_event(event)
 
@@ -170,13 +191,15 @@ def generate(
                 if "__interrupt__" in event:
                     break
 
-        # Get current state with analysis results
+        # Refresh current state after analysis
         current_state = graph.get_state(config)
+
         analysis = current_state.values.get("codebase_analysis", {})
+        selected_dockerfile = current_state.values.get("selected_dockerfile")
 
         # If no prompt was provided, collect it interactively after analysis
         if not prompt and not no_questions:
-            prompt = _collect_deployment_prompt(analysis)
+            prompt = _collect_deployment_prompt(analysis, selected_dockerfile)
             graph.update_state(config, {"prompt": prompt})
 
             # Show configuration now that we have the prompt
@@ -535,11 +558,64 @@ def _extract_vault_updates(responses: dict[str, Any]) -> list[dict] | None:
     return vault_updates if vault_updates else None
 
 
-def _collect_deployment_prompt(analysis: dict) -> str:
+def _collect_dockerfile_selection(state: dict) -> str | None:
+    """Collect user's Dockerfile selection or confirmation.
+
+    Args:
+        state: Current graph state with dockerfiles_found.
+
+    Returns:
+        Selected Dockerfile path, or None if no Dockerfiles.
+    """
+    dockerfiles = state.get("dockerfiles_found", [])
+
+    if len(dockerfiles) == 0:
+        return None
+
+    if len(dockerfiles) == 1:
+        # Single Dockerfile - ask for confirmation
+        dockerfile = dockerfiles[0]
+        console.print(f"\n[bold]Found Dockerfile:[/bold] [cyan]{dockerfile}[/cyan]")
+        confirm = Prompt.ask(
+            "[bold cyan]Use this Dockerfile?[/bold cyan]",
+            choices=["y", "n"],
+            default="y"
+        )
+        if confirm.lower() == "y":
+            console.print(f"[green]Using:[/green] {dockerfile}\n")
+            return dockerfile
+        else:
+            console.print("[yellow]No Dockerfile selected[/yellow]\n")
+            return None
+
+    # Multiple Dockerfiles - show selection menu
+    console.print(f"\n[bold]Found {len(dockerfiles)} Dockerfiles in the repository:[/bold]")
+    for i, df in enumerate(dockerfiles, 1):
+        console.print(f"  [cyan][{i}][/cyan] {df}")
+    console.print()
+
+    while True:
+        choice = Prompt.ask(
+            "[bold cyan]Select Dockerfile to deploy[/bold cyan]",
+            default="1"
+        )
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(dockerfiles):
+                selected = dockerfiles[idx]
+                console.print(f"[green]Selected:[/green] {selected}\n")
+                return selected
+            console.print(f"[red]Please enter a number between 1 and {len(dockerfiles)}[/red]")
+        except ValueError:
+            console.print("[red]Please enter a valid number[/red]")
+
+
+def _collect_deployment_prompt(analysis: dict, selected_dockerfile: str | None = None) -> str:
     """Display analysis summary and collect deployment prompt from user.
 
     Args:
         analysis: The codebase analysis results.
+        selected_dockerfile: The Dockerfile selected earlier (already determined).
 
     Returns:
         User's deployment prompt.
@@ -573,35 +649,7 @@ def _collect_deployment_prompt(analysis: dict) -> str:
     console.print(table)
     console.print()
 
-    # Handle Dockerfile selection
-    dockerfiles = analysis.get("dockerfiles_found", [])
-    selected_dockerfile = None
-
-    if len(dockerfiles) > 1:
-        # Multiple Dockerfiles found - let user choose
-        console.print(f"[bold]Found {len(dockerfiles)} Dockerfiles in the repository:[/bold]")
-        for i, df in enumerate(dockerfiles, 1):
-            console.print(f"  [cyan][{i}][/cyan] {df}")
-        console.print()
-
-        while True:
-            choice = Prompt.ask(
-                "[bold cyan]Select Dockerfile to deploy[/bold cyan]",
-                default="1"
-            )
-            try:
-                idx = int(choice) - 1
-                if 0 <= idx < len(dockerfiles):
-                    selected_dockerfile = dockerfiles[idx]
-                    break
-                console.print(f"[red]Please enter a number between 1 and {len(dockerfiles)}[/red]")
-            except ValueError:
-                console.print("[red]Please enter a valid number[/red]")
-        console.print()
-    elif len(dockerfiles) == 1:
-        selected_dockerfile = dockerfiles[0]
-
-    # Build the default prompt with Dockerfile info
+    # Build the default prompt with Dockerfile info (selection already happened earlier)
     if selected_dockerfile:
         default_prompt = f"Deploy the Docker image defined in {selected_dockerfile}"
     else:

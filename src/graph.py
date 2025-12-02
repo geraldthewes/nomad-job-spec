@@ -10,6 +10,11 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 
 from src.nodes.analyze import create_analyze_node
+from src.nodes.discover import (
+    create_discover_node,
+    create_select_node,
+    should_select_dockerfile,
+)
 from src.nodes.generate import create_generate_node, create_fix_node
 from src.nodes.enrich import create_enrich_node
 from src.nodes.validate import create_validate_node, should_proceed_after_validation
@@ -28,6 +33,10 @@ class AgentState(dict):
     # Input
     prompt: str
     codebase_path: str
+
+    # Dockerfile selection (pre-analysis)
+    dockerfiles_found: list[str]
+    selected_dockerfile: str | None
 
     # Analysis
     codebase_analysis: dict[str, Any]
@@ -89,6 +98,10 @@ def create_initial_state(
     return {
         "prompt": prompt,
         "codebase_path": codebase_path,
+        # Dockerfile selection (pre-analysis)
+        "dockerfiles_found": [],
+        "selected_dockerfile": None,
+        # Analysis
         "codebase_analysis": {},
         "messages": [],
         "questions": [],
@@ -172,8 +185,10 @@ def create_workflow(
 ) -> StateGraph:
     """Create the LangGraph workflow for job spec generation.
 
-    Updated workflow with infrastructure enrichment and validation:
-    START -> analyze -> enrich -> question -> collect -> generate -> validate -> deploy -> verify
+    Workflow with Dockerfile selection before analysis:
+    START -> discover -> [select] -> analyze -> enrich -> question -> collect -> generate -> validate -> deploy -> verify
+
+    The select node is skipped if only one Dockerfile exists (via conditional edge).
 
     Args:
         llm: LLM instance for analysis and generation.
@@ -187,6 +202,8 @@ def create_workflow(
         settings = get_settings()
 
     # Create node functions
+    discover_node = create_discover_node()
+    select_node = create_select_node()
     analyze_node = create_analyze_node(llm)
     enrich_node = create_enrich_node(settings)
     question_node = create_question_node()
@@ -199,6 +216,8 @@ def create_workflow(
     workflow = StateGraph(dict)
 
     # Add nodes
+    workflow.add_node("discover", discover_node)
+    workflow.add_node("select", select_node)
     workflow.add_node("analyze", analyze_node)
     workflow.add_node("enrich", enrich_node)
     workflow.add_node("question", question_node)
@@ -206,13 +225,25 @@ def create_workflow(
     workflow.add_node("generate", generate_node)
     workflow.add_node("validate", validate_node)
 
-    # Updated flow: analyze -> enrich -> question -> collect -> generate -> validate
-    workflow.add_edge(START, "analyze")
-    workflow.add_edge("analyze", "enrich")  # NEW
-    workflow.add_edge("enrich", "question")  # MODIFIED
+    # Flow: discover -> [select] -> analyze -> enrich -> question -> collect -> generate -> validate
+    workflow.add_edge(START, "discover")
+
+    # Conditional: skip selection if only 1 Dockerfile or none
+    workflow.add_conditional_edges(
+        "discover",
+        should_select_dockerfile,
+        {
+            "select": "select",
+            "skip": "analyze",
+        },
+    )
+    workflow.add_edge("select", "analyze")
+
+    workflow.add_edge("analyze", "enrich")
+    workflow.add_edge("enrich", "question")
     workflow.add_edge("question", "collect")
     workflow.add_edge("collect", "generate")
-    workflow.add_edge("generate", "validate")  # NEW
+    workflow.add_edge("generate", "validate")
 
     if include_deployment:
         # Add deployment nodes (Phase 2 - stubs for now)
@@ -290,10 +321,10 @@ def compile_graph(
 
     if enable_checkpointing:
         checkpointer = MemorySaver()
-        # Interrupt before collect for HitL
+        # Interrupt before select (Dockerfile) and collect (questions) for HitL
         return workflow.compile(
             checkpointer=checkpointer,
-            interrupt_before=["collect"],
+            interrupt_before=["select", "collect"],
         )
     else:
         return workflow.compile()

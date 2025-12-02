@@ -359,10 +359,14 @@ def _build_task_block(config: JobConfig) -> str:
     task "{config.task_name}" {{
       driver = "docker"''')
 
-    # Vault block
+    # Vault block - only generate standalone if NOT using native env stanza
+    # (native env stanza generates its own vault block with policies included)
     if config.vault:
-        policies = json.dumps(config.vault.policies)
-        parts.append(f'''
+        if config.vault.use_native_env and config.vault.secrets:
+            pass  # Will be handled by _build_vault_env_stanza below
+        else:
+            policies = json.dumps(config.vault.policies)
+            parts.append(f'''
       vault {{
         policies = {policies}
       }}''')
@@ -468,15 +472,17 @@ EOH
 
 
 def _build_vault_env_stanza(vault: VaultConfig) -> str:
-    """Build Nomad 1.4+ native vault env stanza.
+    """Build Nomad 1.4+ native vault env stanza with policies.
 
-    This generates the newer format:
+    This generates the newer format with policies included:
     vault {
+      policies = ["app-policy"]
       env {
         DB_PASSWORD = "secret/data/myapp/db#password"
       }
     }
     """
+    policies = json.dumps(vault.policies)
     env_lines = []
     for env_var, secret_path in vault.secrets.items():
         # Normalize path to use # separator for Nomad native format
@@ -488,6 +494,7 @@ def _build_vault_env_stanza(vault: VaultConfig) -> str:
 
     return f'''
       vault {{
+        policies = {policies}
         env {{
 {chr(10).join(env_lines)}
         }}
