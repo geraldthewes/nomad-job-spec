@@ -117,22 +117,30 @@ Each node should:
 
 ## Prompt Management
 
-- **Storage**: LangFuse as central CMS with version control, composability, protected labels
-- **Optimization**: DSPy compiles programs with signatures (e.g., `dspy.Signature("analyze_codebase", input="code", output="summary")`)
-- **Workflow**: Create base prompts in LangFuse → Optimize with DSPy using training data from LangFuse traces → Update refined versions back to LangFuse
+See [docs/prompts.md](docs/prompts.md) for detailed documentation.
 
-Example:
-```python
-# Fetch from LangFuse
-prompt = langfuse.get_prompt(name="code_analysis", version=2)
+**Quick Reference:**
 
-# Optimize with DSPy
-optimizer = BootstrapFewShot(metric=accuracy)
-compiled = optimizer.compile(program)
+```bash
+# List local prompts
+nomad-spec-prompt list
 
-# Update back to LangFuse
-langfuse.create_prompt(name="code_analysis", prompt=compiled.signature, version=3)
+# Push prompts to LangFuse
+nomad-spec-prompt push --label development
+
+# Pull prompts from LangFuse
+nomad-spec-prompt pull --label production
 ```
+
+**Key Files:**
+- `prompts/*.json` - Local prompt files (version controlled)
+- `src/prompts/__init__.py` - PromptManager with LangFuse integration
+- `src/prompt_cli.py` - CLI tool for prompt management
+
+**Architecture:**
+- LangFuse is the runtime source (with labels: development, staging, production)
+- Local JSON files are the version-controlled baseline and fallback
+- Changes flow: Local → LangFuse → Runtime
 
 ## Memory Integration
 
