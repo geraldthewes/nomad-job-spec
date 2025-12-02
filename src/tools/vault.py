@@ -99,11 +99,8 @@ class VaultClient:
         self.token = token or os.environ.get("VAULT_TOKEN")
         self.namespace = namespace or os.environ.get("VAULT_NAMESPACE")
 
-        if not self.token:
-            logger.warning(
-                f"No Vault token provided (VAULT_TOKEN not set). "
-                f"Vault operations at {self.addr} will require authentication."
-            )
+        # Note: No warning logged here - infrastructure health check handles
+        # reporting token issues to the user in a unified way
 
         self._client = hvac.Client(
             url=self.addr,

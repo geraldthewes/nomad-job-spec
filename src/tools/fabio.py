@@ -113,17 +113,14 @@ class FabioClient:
             return []
 
         except httpx.ConnectError as e:
-            logger.error(
-                f"Fabio connection refused at {self.addr}. "
-                f"Check if Fabio is running and FABIO_ADMIN_ADDR is correct."
-            )
+            # Connection errors are reported via infrastructure health check
+            # Just log at debug level to avoid duplicate messages
+            logger.debug(f"Fabio connection error at {self.addr}: {e}")
             return []
 
         except httpx.TimeoutException as e:
-            logger.error(
-                f"Fabio connection timeout at {self.addr}. "
-                f"Check network connectivity to Fabio admin endpoint."
-            )
+            # Timeout errors are reported via infrastructure health check
+            logger.debug(f"Fabio timeout at {self.addr}: {e}")
             return []
 
         except httpx.HTTPError as e:

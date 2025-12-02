@@ -64,13 +64,31 @@ def create_enrich_node(
     if settings is None:
         settings = get_settings()
 
-    # Initialize clients if provided
+    # Initialize clients with settings if not provided
+    # This ensures they use .env values via pydantic-settings
     if vault_client:
         set_vault_client(vault_client)
+    else:
+        set_vault_client(VaultClient(
+            addr=settings.vault_addr,
+            token=settings.vault_token,
+            namespace=settings.vault_namespace,
+        ))
+
     if consul_client:
         set_consul_client(consul_client)
+    else:
+        set_consul_client(ConsulClient(
+            addr=settings.consul_http_addr,
+            token=settings.consul_http_token,
+        ))
+
     if fabio_client:
         set_fabio_client(fabio_client)
+    else:
+        set_fabio_client(FabioClient(
+            addr=settings.fabio_admin_addr,
+        ))
 
     def enrich_node(state: dict[str, Any]) -> dict[str, Any]:
         """Enrich codebase analysis with infrastructure context.

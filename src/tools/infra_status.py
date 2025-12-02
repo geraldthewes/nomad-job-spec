@@ -521,5 +521,5 @@ def check_infrastructure_from_settings(settings) -> InfraHealthReport:
         consul_token=settings.consul_http_token,
         fabio_addr=settings.fabio_admin_addr,
         vault_addr=settings.vault_addr,
-        vault_token=os.environ.get("VAULT_TOKEN"),  # Not in settings
+        vault_token=settings.vault_token,
     )

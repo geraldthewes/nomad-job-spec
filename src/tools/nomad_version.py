@@ -135,36 +135,20 @@ def get_nomad_version(
 
         # Get agent info which includes version
         agent_info = client.agent.get_agent()
-        version_string = agent_info.get("config", {}).get("Version", "1.0.0")
+        version_data = agent_info.get("config", {}).get("Version", "1.0.0")
+
+        # Handle case where Version might be a dict (nomad-python API variations)
+        if isinstance(version_data, dict):
+            version_string = version_data.get("Version", "1.4.0")
+        else:
+            version_string = str(version_data) if version_data else "1.4.0"
 
         return NomadVersion.parse(version_string)
 
     except Exception as e:
-        error_str = str(e).lower()
-
-        # Provide more specific error messages based on error type
-        if "connection refused" in error_str or "[errno 111]" in error_str:
-            logger.warning(
-                f"Nomad connection refused at {addr}. "
-                f"Check if Nomad is running. Using default version 1.4.0"
-            )
-        elif "self does not exist" in error_str:
-            logger.warning(
-                f"Nomad agent API returned unexpected response at {addr}. "
-                f"Check Nomad server health. Using default version 1.4.0"
-            )
-        elif "timeout" in error_str or "timed out" in error_str:
-            logger.warning(
-                f"Nomad connection timeout at {addr}. "
-                f"Check network connectivity. Using default version 1.4.0"
-            )
-        elif "401" in str(e) or "unauthorized" in error_str:
-            logger.warning(
-                f"Nomad authentication failed at {addr}. "
-                f"Check NOMAD_TOKEN. Using default version 1.4.0"
-            )
-        else:
-            logger.warning(f"Failed to get Nomad version from {addr}: {e}. Using default 1.4.0")
+        # Log at debug level - infrastructure health check handles user-facing errors
+        # Version detection failure is non-critical, we fall back to 1.4.0
+        logger.debug(f"Failed to get Nomad version from {addr}: {e}. Using default 1.4.0")
 
         # Return a reasonable default that supports most features
         return NomadVersion(major=1, minor=4, patch=0)

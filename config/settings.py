@@ -76,6 +76,10 @@ class Settings(BaseSettings):
         default="http://localhost:8200",
         description="Vault server address",
     )
+    vault_token: str | None = Field(
+        default=None,
+        description="Vault authentication token",
+    )
     vault_namespace: str | None = Field(
         default=None,
         description="Vault namespace (Enterprise only)",

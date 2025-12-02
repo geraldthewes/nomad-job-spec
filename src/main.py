@@ -97,8 +97,10 @@ def generate(
         with console.status("[bold green]Checking infrastructure..."):
             health_report = check_infrastructure_from_settings(settings)
 
+        # Always display infrastructure status
+        _display_infra_status(health_report)
+
         if not health_report.all_healthy:
-            _display_infra_status(health_report)
             failures = health_report.get_failures()
 
             if not no_questions:
@@ -108,8 +110,6 @@ def generate(
                     console.print("[dim]Aborted by user[/dim]")
                     raise typer.Exit(code=1)
                 console.print()
-        elif verbose:
-            _display_infra_status(health_report)
 
     # Show initial configuration if prompt was provided
     if prompt:
