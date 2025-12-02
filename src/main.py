@@ -83,12 +83,13 @@ def generate(
 
     # Initialize observability
     obs = get_observability(settings)
-    if obs.is_enabled():
-        console.print("[dim]LangFuse tracing enabled[/dim]")
 
-    # Generate session ID for trace grouping
-    import time
-    session_id = f"session-{cluster_id}-{int(time.time())}"
+    # Generate session ID for trace grouping (UUID for easy Langfuse matching)
+    import uuid
+    session_id = str(uuid.uuid4())
+
+    if obs.is_enabled():
+        console.print(f"[dim]LangFuse tracing enabled | Session: {session_id}[/dim]")
 
     # Validate path
     codebase_path = Path(path)
@@ -157,7 +158,22 @@ def generate(
     )
 
     # Run graph with HitL for questions
-    config = {"configurable": {"thread_id": f"session-{cluster_id}"}}
+    # Include Langfuse metadata for session tracking and tagging
+    config = {
+        "configurable": {"thread_id": f"session-{cluster_id}"},
+        "metadata": {
+            "langfuse_session_id": session_id,
+            "langfuse_tags": ["nomad-job-spec"],
+        },
+    }
+
+    # Log initial trace with codebase location
+    if obs.is_enabled():
+        trace = obs.create_trace(
+            name="graph_start",
+            input={"codebase_path": str(codebase_path.absolute()) if not is_git_url else path},
+        )
+        trace.end()
 
     try:
         # First run - discover Dockerfiles
