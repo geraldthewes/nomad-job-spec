@@ -182,9 +182,8 @@ class ObservabilityManager:
     def create_trace(self, name: str, **kwargs: Any) -> "_SpanWrapper | _NoOpSpan":
         """Create a manual trace for custom instrumentation.
 
-        In LangFuse v3+, traces are created implicitly via start_span().
-        This method creates a root span that acts as the trace container,
-        and sets the trace name to match the span name.
+        Creates an independent trace (one per node) that inherits session_id
+        and tags from any active propagate_attributes context.
 
         Args:
             name: Name for the trace.
@@ -198,7 +197,7 @@ class ObservabilityManager:
             return _NoOpSpan()
 
         try:
-            # In v3+, start_span creates a span (and implicitly a trace)
+            # start_span creates an independent trace that inherits propagated attributes
             span_kwargs: dict[str, Any] = {"name": name}
             if "input" in kwargs:
                 span_kwargs["input"] = kwargs["input"]
@@ -361,10 +360,14 @@ class _SpanWrapper:
 
     In LangFuse v3+, end() only accepts end_time. This wrapper allows
     passing output, level, status_message etc. to end() for convenience.
+
+    Optionally manages a context manager for spans created via
+    start_as_current_observation.
     """
 
-    def __init__(self, span: Any):
+    def __init__(self, span: Any, ctx_manager: Any = None):
         self._span = span
+        self._ctx_manager = ctx_manager
 
     def end(
         self,
@@ -376,6 +379,7 @@ class _SpanWrapper:
         """End the span with optional output, level, and status_message.
 
         In v3+, we call update() first to set these values, then end().
+        If a context manager was provided, we exit it properly.
         """
         if self._span is None:
             return
@@ -393,8 +397,15 @@ class _SpanWrapper:
         if update_kwargs and hasattr(self._span, "update"):
             self._span.update(**update_kwargs)
 
-        # End the span
-        if hasattr(self._span, "end"):
+        # Exit the context manager if we have one (this also ends the span)
+        if self._ctx_manager is not None:
+            try:
+                self._ctx_manager.__exit__(None, None, None)
+            except Exception:
+                pass  # Ignore errors during context exit
+            self._ctx_manager = None
+        elif hasattr(self._span, "end"):
+            # Fall back to direct end() if no context manager
             self._span.end()
 
     def start_span(self, **kwargs: Any) -> "_SpanWrapper":

@@ -1,9 +1,12 @@
 """CLI entry point for the Nomad Job Spec Agent."""
 
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 import typer
 from rich.console import Console
@@ -158,91 +161,93 @@ def generate(
     )
 
     # Run graph with HitL for questions
-    # Include Langfuse metadata for session tracking and tagging
-    config = {
-        "configurable": {"thread_id": f"session-{cluster_id}"},
-        "metadata": {
-            "langfuse_session_id": session_id,
-            "langfuse_tags": ["nomad-job-spec"],
-        },
-    }
+    config = {"configurable": {"thread_id": f"session-{cluster_id}"}}
 
-    # Log initial trace with codebase location
-    if obs.is_enabled():
-        trace = obs.create_trace(
-            name="graph_start",
-            input={"codebase_path": str(codebase_path.absolute()) if not is_git_url else path},
-        )
-        trace.end()
+    # Use ExitStack to manage Langfuse tracing context
+    from contextlib import ExitStack
 
     try:
-        # First run - discover Dockerfiles
-        with console.status("[bold green]Discovering Dockerfiles..."):
-            for event in graph.stream(state, config):
-                if verbose:
-                    _print_event(event)
+        with ExitStack() as stack:
+            # Set up Langfuse attribute propagation if enabled
+            # This propagates session_id and tags to all traces created within this context
+            if obs.is_enabled():
+                try:
+                    from langfuse import propagate_attributes
 
-                # Check for interrupt (Dockerfile selection or questions ready)
-                if "__interrupt__" in event:
-                    break
+                    # Propagate session_id and tags to all traces (each node gets its own trace)
+                    stack.enter_context(propagate_attributes(
+                        session_id=session_id,
+                        tags=["nomad-job-spec"],
+                    ))
+                except Exception as e:
+                    logger.warning(f"Failed to set up Langfuse attribute propagation: {e}")
+            # First run - discover Dockerfiles
+            with console.status("[bold green]Discovering Dockerfiles..."):
+                for event in graph.stream(state, config):
+                    if verbose:
+                        _print_event(event)
 
-        # Get current state to check if Dockerfile selection is needed
-        current_state = graph.get_state(config)
-        dockerfiles = current_state.values.get("dockerfiles_found", [])
-        selected = current_state.values.get("selected_dockerfile")
+                    # Check for interrupt (Dockerfile selection or questions ready)
+                    if "__interrupt__" in event:
+                        break
 
-        # Handle Dockerfile selection/confirmation if needed
-        if dockerfiles and not selected and not no_questions:
-            selected = _collect_dockerfile_selection(current_state.values)
-            if selected:
-                # Merge with full current state to preserve all values
-                updated_state = {**current_state.values, "selected_dockerfile": selected}
-                graph.update_state(config, updated_state)
+            # Get current state to check if Dockerfile selection is needed
+            current_state = graph.get_state(config)
+            dockerfiles = current_state.values.get("dockerfiles_found", [])
+            selected = current_state.values.get("selected_dockerfile")
 
-        # Continue to analysis (whether selection was made or skipped)
-        with console.status("[bold green]Analyzing codebase..."):
-            for event in graph.stream(None, config):
-                if verbose:
-                    _print_event(event)
+            # Handle Dockerfile selection/confirmation if needed
+            if dockerfiles and not selected and not no_questions:
+                selected = _collect_dockerfile_selection(current_state.values)
+                if selected:
+                    # Merge with full current state to preserve all values
+                    updated_state = {**current_state.values, "selected_dockerfile": selected}
+                    graph.update_state(config, updated_state)
 
-                # Check for interrupt (questions ready)
-                if "__interrupt__" in event:
-                    break
-
-        # Refresh current state after analysis
-        current_state = graph.get_state(config)
-
-        analysis = current_state.values.get("codebase_analysis", {})
-        selected_dockerfile = current_state.values.get("selected_dockerfile")
-
-        # If no prompt was provided, auto-generate based on selected Dockerfile
-        if not prompt:
-            prompt = f"Deploy using {selected_dockerfile}" if selected_dockerfile else "Deploy this application"
-            graph.update_state(config, {"prompt": prompt})
-
-        if not no_questions and current_state.values.get("questions"):
-            # Display questions and collect responses
-            responses = _collect_user_responses(current_state.values)
-
-            # Update state with responses and any confirmed vault paths
-            state_updates = {"user_responses": responses}
-
-            # Check for structured vault path responses and update vault_suggestions
-            vault_updates = _extract_vault_updates(responses)
-            if vault_updates:
-                state_updates["vault_suggestions"] = {"suggestions": vault_updates}
-
-            graph.update_state(config, state_updates)
-
-            # Continue execution
-            with console.status("[bold green]Generating job specification..."):
+            # Continue to analysis (whether selection was made or skipped)
+            with console.status("[bold green]Analyzing codebase..."):
                 for event in graph.stream(None, config):
                     if verbose:
                         _print_event(event)
 
-        # Get final state
-        final_state = graph.get_state(config)
-        result = final_state.values
+                    # Check for interrupt (questions ready)
+                    if "__interrupt__" in event:
+                        break
+
+            # Refresh current state after analysis
+            current_state = graph.get_state(config)
+
+            analysis = current_state.values.get("codebase_analysis", {})
+            selected_dockerfile = current_state.values.get("selected_dockerfile")
+
+            # If no prompt was provided, auto-generate based on selected Dockerfile
+            if not prompt:
+                prompt = f"Deploy using {selected_dockerfile}" if selected_dockerfile else "Deploy this application"
+                graph.update_state(config, {"prompt": prompt})
+
+            if not no_questions and current_state.values.get("questions"):
+                # Display questions and collect responses
+                responses = _collect_user_responses(current_state.values)
+
+                # Update state with responses and any confirmed vault paths
+                state_updates = {"user_responses": responses}
+
+                # Check for structured vault path responses and update vault_suggestions
+                vault_updates = _extract_vault_updates(responses)
+                if vault_updates:
+                    state_updates["vault_suggestions"] = {"suggestions": vault_updates}
+
+                graph.update_state(config, state_updates)
+
+                # Continue execution
+                with console.status("[bold green]Generating job specification..."):
+                    for event in graph.stream(None, config):
+                        if verbose:
+                            _print_event(event)
+
+            # Get final state
+            final_state = graph.get_state(config)
+            result = final_state.values
 
     except Exception as e:
         console.print(f"[red]Error during execution:[/red] {e}")
