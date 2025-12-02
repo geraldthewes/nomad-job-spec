@@ -13,6 +13,8 @@ from src.nodes.analyze import create_analyze_node
 from src.nodes.generate import create_generate_node, create_fix_node
 from src.nodes.enrich import create_enrich_node
 from src.nodes.validate import create_validate_node, should_proceed_after_validation
+from src.nodes.question import create_question_node, create_collect_node
+from src.nodes.deploy import create_deploy_node, create_verify_node
 from config.settings import Settings, get_settings
 
 
@@ -115,94 +117,6 @@ def create_initial_state(
     }
 
 
-def generate_questions_node(state: dict[str, Any]) -> dict[str, Any]:
-    """Generate clarifying questions based on analysis.
-
-    This node creates questions to ask the user before generating the spec.
-    Now enhanced with multi-source env var configurations from enrichment.
-    """
-    analysis = state.get("codebase_analysis", {})
-    env_var_configs = state.get("env_var_configs", [])
-    vault_suggestions = state.get("vault_suggestions", {})  # Legacy fallback
-    fabio_validation = state.get("fabio_validation", {})
-    questions = []
-
-    # Check if image is missing
-    dockerfile = analysis.get("dockerfile")
-    if not dockerfile or not dockerfile.get("base_image"):
-        questions.append("What Docker image should be used for this deployment?")
-
-    # Environment variable configuration with multi-source support
-    env_vars = analysis.get("env_vars_required", [])
-    if env_vars:
-        if env_var_configs:
-            # New format: multi-source configuration
-            questions.append({
-                "type": "env_configs",
-                "configs": env_var_configs[:15],  # Limit to first 15
-                "prompt": "Environment variable configuration",
-            })
-        elif vault_suggestions.get("suggestions"):
-            # Legacy fallback: Vault-only suggestions
-            questions.append({
-                "type": "vault_paths",
-                "suggestions": vault_suggestions["suggestions"][:10],
-                "prompt": "Environment variable Vault paths",
-            })
-        else:
-            questions.append(
-                f"The following environment variables were detected: {', '.join(env_vars[:5])}. "
-                "How should these be configured? (fixed value, Consul KV, or Vault secret)"
-            )
-
-    # Check for ports
-    if not (dockerfile and dockerfile.get("exposed_ports")):
-        questions.append("What port does this application listen on?")
-
-    # Fabio routing question with suggestion
-    suggested_hostname = fabio_validation.get("suggested_hostname")
-    conflicts = fabio_validation.get("conflicts", [])
-    if suggested_hostname:
-        if conflicts:
-            conflict_info = "; ".join(
-                f"{c['type']} with {c.get('existing_service', 'unknown')}"
-                for c in conflicts
-            )
-            questions.append(
-                f"Suggested hostname '{suggested_hostname}' has conflicts: {conflict_info}. "
-                "Please provide an alternative hostname."
-            )
-        else:
-            questions.append(
-                f"Suggested Fabio hostname: {suggested_hostname} (tag: urlprefix-{suggested_hostname}:9999/). "
-                "Confirm or provide alternative."
-            )
-
-    # Resource questions
-    resources = analysis.get("suggested_resources", {})
-    questions.append(
-        f"Suggested resources: {resources.get('cpu', 500)}MHz CPU, "
-        f"{resources.get('memory', 256)}MB memory. Is this appropriate?"
-    )
-
-    # Scaling question
-    questions.append("How many instances should be deployed initially?")
-
-    return {
-        **state,
-        "questions": questions,
-    }
-
-
-def collect_responses_node(state: dict[str, Any]) -> dict[str, Any]:
-    """Node for collecting user responses.
-
-    In the actual flow, this is an interrupt point where the CLI collects responses.
-    This node just passes through - the actual collection happens via graph interrupt.
-    """
-    return state
-
-
 def should_retry(state: dict[str, Any]) -> Literal["retry", "success", "give_up"]:
     """Determine if we should retry after verification.
 
@@ -275,6 +189,8 @@ def create_workflow(
     # Create node functions
     analyze_node = create_analyze_node(llm)
     enrich_node = create_enrich_node(settings)
+    question_node = create_question_node()
+    collect_node = create_collect_node()
     generate_node = create_generate_node(llm)
     validate_node = create_validate_node(settings)
     fix_node = create_fix_node(llm)
@@ -284,11 +200,11 @@ def create_workflow(
 
     # Add nodes
     workflow.add_node("analyze", analyze_node)
-    workflow.add_node("enrich", enrich_node)  # NEW: Infrastructure enrichment
-    workflow.add_node("question", generate_questions_node)
-    workflow.add_node("collect", collect_responses_node)
+    workflow.add_node("enrich", enrich_node)
+    workflow.add_node("question", question_node)
+    workflow.add_node("collect", collect_node)
     workflow.add_node("generate", generate_node)
-    workflow.add_node("validate", validate_node)  # NEW: Pre-deploy validation
+    workflow.add_node("validate", validate_node)
 
     # Updated flow: analyze -> enrich -> question -> collect -> generate -> validate
     workflow.add_edge(START, "analyze")
@@ -300,8 +216,10 @@ def create_workflow(
 
     if include_deployment:
         # Add deployment nodes (Phase 2 - stubs for now)
-        workflow.add_node("deploy", _deploy_stub)
-        workflow.add_node("verify", _verify_stub)
+        deploy_node = create_deploy_node(settings)
+        verify_node = create_verify_node(settings)
+        workflow.add_node("deploy", deploy_node)
+        workflow.add_node("verify", verify_node)
         workflow.add_node("fix", fix_node)
 
         # Conditional routing after validation (STRICT mode)
@@ -332,23 +250,6 @@ def create_workflow(
         workflow.add_edge("validate", END)
 
     return workflow
-
-
-def _deploy_stub(state: dict[str, Any]) -> dict[str, Any]:
-    """Stub for deployment node (implemented in Phase 2)."""
-    return {
-        **state,
-        "deployment_status": "success",  # Stub returns success
-        "job_id": f"stub-{state.get('job_name', 'job')}",
-    }
-
-
-def _verify_stub(state: dict[str, Any]) -> dict[str, Any]:
-    """Stub for verification node (implemented in Phase 2)."""
-    return {
-        **state,
-        "deployment_status": "success",
-    }
 
 
 def compile_graph(

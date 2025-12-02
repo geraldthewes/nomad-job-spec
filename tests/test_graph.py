@@ -8,8 +8,8 @@ from src.graph import (
     compile_graph,
     run_graph,
     should_retry,
-    generate_questions_node,
 )
+from src.nodes.question import generate_questions_node
 
 
 class TestCreateInitialState:
