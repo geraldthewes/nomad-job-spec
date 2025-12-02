@@ -117,7 +117,7 @@ def generate(
             f"[bold]Nomad Job Spec Generator[/bold]\n\n"
             f"Prompt: {prompt}\n"
             f"Codebase: {path}\n"
-            f"Cluster: {cluster_id}",
+            f"Datacenter: {settings.nomad_datacenter}  Namespace: {cluster_id}",
             title="Configuration",
         ))
 
@@ -173,7 +173,7 @@ def generate(
                 f"[bold]Nomad Job Spec Generator[/bold]\n\n"
                 f"Prompt: {prompt}\n"
                 f"Codebase: {path}\n"
-                f"Cluster: {cluster_id}",
+                f"Datacenter: {settings.nomad_datacenter}  Namespace: {cluster_id}",
                 title="Configuration",
             ))
 
