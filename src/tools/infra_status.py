@@ -469,6 +469,94 @@ def check_vault_health(
         )
 
 
+def check_langfuse_health(
+    enabled: bool = False,
+    public_key: str | None = None,
+    secret_key: str | None = None,
+    base_url: str | None = None,
+) -> InfraStatus:
+    """Check LangFuse observability service health.
+
+    Args:
+        enabled: Whether LangFuse is enabled in settings.
+        public_key: LangFuse public key.
+        secret_key: LangFuse secret key.
+        base_url: LangFuse base URL.
+
+    Returns:
+        InfraStatus with availability and any error details.
+    """
+    base_url = base_url or "https://cloud.langfuse.com"
+
+    # If not enabled, report as disabled (not an error)
+    if not enabled:
+        return InfraStatus(
+            service="LangFuse",
+            available=False,
+            address=base_url,
+            error="Disabled",
+            suggestion="Set LANGFUSE_ENABLED=true to enable tracing",
+        )
+
+    # Check for required keys
+    if not public_key or not secret_key:
+        missing = []
+        if not public_key:
+            missing.append("LANGFUSE_PUBLIC_KEY")
+        if not secret_key:
+            missing.append("LANGFUSE_SECRET_KEY")
+        return InfraStatus(
+            service="LangFuse",
+            available=False,
+            address=base_url,
+            error="Missing credentials",
+            suggestion=f"Set {', '.join(missing)}",
+        )
+
+    try:
+        from langfuse import Langfuse
+
+        client = Langfuse(
+            public_key=public_key,
+            secret_key=secret_key,
+            host=base_url,
+        )
+
+        if client.auth_check():
+            return InfraStatus(
+                service="LangFuse",
+                available=True,
+                address=base_url,
+            )
+        else:
+            return InfraStatus(
+                service="LangFuse",
+                available=False,
+                address=base_url,
+                error="Authentication failed",
+                suggestion="Check LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY",
+            )
+
+    except ImportError:
+        return InfraStatus(
+            service="LangFuse",
+            available=False,
+            address=base_url,
+            error="Package not installed",
+            suggestion="Run: pip install langfuse",
+        )
+    except Exception as e:
+        error_msg, suggestion = _parse_connection_error(e, "langfuse", base_url)
+        logger.debug(f"LangFuse health check failed: {e}")
+        return InfraStatus(
+            service="LangFuse",
+            available=False,
+            address=base_url,
+            error=error_msg,
+            suggestion=suggestion,
+        )
+
+
 def check_all_infrastructure(
     nomad_addr: str | None = None,
     nomad_token: str | None = None,
@@ -477,6 +565,10 @@ def check_all_infrastructure(
     fabio_addr: str | None = None,
     vault_addr: str | None = None,
     vault_token: str | None = None,
+    langfuse_enabled: bool = False,
+    langfuse_public_key: str | None = None,
+    langfuse_secret_key: str | None = None,
+    langfuse_base_url: str | None = None,
     timeout: float = 5.0,
 ) -> InfraHealthReport:
     """Check health of all infrastructure services.
@@ -489,6 +581,10 @@ def check_all_infrastructure(
         fabio_addr: Fabio admin address.
         vault_addr: Vault server address.
         vault_token: Vault token.
+        langfuse_enabled: Whether LangFuse is enabled.
+        langfuse_public_key: LangFuse public key.
+        langfuse_secret_key: LangFuse secret key.
+        langfuse_base_url: LangFuse base URL.
         timeout: Connection timeout in seconds.
 
     Returns:
@@ -501,6 +597,9 @@ def check_all_infrastructure(
     report.statuses.append(check_consul_health(consul_addr, consul_token, timeout))
     report.statuses.append(check_fabio_health(fabio_addr, timeout))
     report.statuses.append(check_vault_health(vault_addr, vault_token, timeout))
+    report.statuses.append(check_langfuse_health(
+        langfuse_enabled, langfuse_public_key, langfuse_secret_key, langfuse_base_url
+    ))
 
     return report
 
@@ -522,4 +621,8 @@ def check_infrastructure_from_settings(settings) -> InfraHealthReport:
         fabio_addr=settings.fabio_admin_addr,
         vault_addr=settings.vault_addr,
         vault_token=settings.vault_token,
+        langfuse_enabled=settings.langfuse_enabled,
+        langfuse_public_key=settings.langfuse_public_key,
+        langfuse_secret_key=settings.langfuse_secret_key,
+        langfuse_base_url=settings.langfuse_base_url,
     )

@@ -142,15 +142,11 @@ class TestObservabilityManager:
                 handler = manager.get_handler(trace_name="test", session_id="session-123")
 
                 assert handler is mock_handler
-                mock_handler_class.assert_called_once_with(
-                    public_key="test-public-key",
-                    secret_key="test-secret-key",
-                    host="https://cloud.langfuse.com",
-                    trace_name="test",
-                    session_id="session-123",
-                    user_id=None,
-                    metadata=None,
-                )
+                # LangFuse v3+ CallbackHandler takes no constructor args
+                mock_handler_class.assert_called_once_with()
+                # Trace context is stored on the handler for use in LangChain config
+                assert handler._trace_name == "test"
+                assert handler._session_id == "session-123"
 
     def test_get_handler_returns_none_when_disabled(self, disabled_settings):
         """Verify get_handler returns None when disabled."""

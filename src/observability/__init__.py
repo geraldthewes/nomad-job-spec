@@ -101,6 +101,11 @@ class ObservabilityManager:
         Creates a new CallbackHandler instance that will trace LLM calls
         to LangFuse. Each handler creates a new trace.
 
+        Note: In LangFuse v3+, the CallbackHandler reads credentials from
+        environment variables (LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY,
+        LANGFUSE_HOST). Trace metadata like session_id and user_id should
+        be passed via LangChain's config metadata.
+
         Args:
             trace_name: Name for the trace (e.g., "nomad-job-spec").
             session_id: Session identifier for grouping related traces.
@@ -116,21 +121,58 @@ class ObservabilityManager:
         try:
             from langfuse.langchain import CallbackHandler
 
-            return CallbackHandler(
-                public_key=self._settings.langfuse_public_key,
-                secret_key=self._settings.langfuse_secret_key,
-                host=self._settings.langfuse_base_url,
-                trace_name=trace_name,
-                session_id=session_id,
-                user_id=user_id,
-                metadata=metadata,
-            )
+            # LangFuse v3+ CallbackHandler reads credentials from env vars
+            # Trace attributes are passed via LangChain config metadata
+            handler = CallbackHandler()
+
+            # Store trace context for use in LangChain config
+            handler._trace_name = trace_name
+            handler._session_id = session_id
+            handler._user_id = user_id
+            handler._metadata = metadata
+
+            return handler
         except ImportError:
-            logger.warning("langfuse.callback not available")
+            logger.warning("langfuse.langchain not available")
             return None
         except Exception as e:
             logger.warning(f"Failed to create LangFuse handler: {e}")
             return None
+
+    def get_langchain_config(
+        self,
+        handler: "CallbackHandler | None",
+    ) -> dict[str, Any]:
+        """Get LangChain config dict with LangFuse metadata.
+
+        Use this to pass trace metadata when invoking LangChain components.
+
+        Args:
+            handler: The CallbackHandler from get_handler().
+
+        Returns:
+            Config dict with callbacks and metadata for LangChain invoke().
+        """
+        if handler is None:
+            return {}
+
+        config: dict[str, Any] = {"callbacks": [handler]}
+
+        # Build metadata from stored trace context
+        metadata: dict[str, Any] = {}
+        if hasattr(handler, "_session_id") and handler._session_id:
+            metadata["langfuse_session_id"] = handler._session_id
+        if hasattr(handler, "_user_id") and handler._user_id:
+            metadata["langfuse_user_id"] = handler._user_id
+        if hasattr(handler, "_trace_name") and handler._trace_name:
+            metadata["langfuse_trace_name"] = handler._trace_name
+        if hasattr(handler, "_metadata") and handler._metadata:
+            metadata.update(handler._metadata)
+
+        if metadata:
+            config["metadata"] = metadata
+
+        return config
 
     def create_trace(self, name: str, **kwargs: Any) -> Any:
         """Create a manual trace for custom instrumentation.
