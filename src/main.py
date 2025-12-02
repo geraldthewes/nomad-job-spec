@@ -3,7 +3,7 @@
 import json
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 from rich.console import Console
@@ -181,8 +181,15 @@ def generate(
             # Display questions and collect responses
             responses = _collect_user_responses(current_state.values)
 
-            # Update state with responses
-            graph.update_state(config, {"user_responses": responses})
+            # Update state with responses and any confirmed vault paths
+            state_updates = {"user_responses": responses}
+
+            # Check for structured vault path responses and update vault_suggestions
+            vault_updates = _extract_vault_updates(responses)
+            if vault_updates:
+                state_updates["vault_suggestions"] = {"suggestions": vault_updates}
+
+            graph.update_state(config, state_updates)
 
             # Continue execution
             with console.status("[bold green]Generating job specification..."):
@@ -278,18 +285,158 @@ def validate(
         raise typer.Exit(code=1)
 
 
-def _collect_user_responses(state: dict) -> dict[str, str]:
-    """Collect user responses to generated questions."""
+def _collect_user_responses(state: dict) -> dict[str, Any]:
+    """Collect user responses to generated questions.
+
+    Handles both plain string questions and structured questions
+    (like vault_paths which use interactive step-by-step flow).
+    """
     questions = state.get("questions", [])
     responses = {}
 
     console.print("\n[bold]Please answer the following questions:[/bold]\n")
 
     for i, question in enumerate(questions, 1):
-        response = Prompt.ask(f"[cyan]{i}.[/cyan] {question}")
-        responses[f"q{i}"] = response
+        if isinstance(question, dict) and question.get("type") == "vault_paths":
+            # Route to interactive Vault path handler
+            vault_responses = _collect_vault_path_responses(question["suggestions"])
+            responses[f"q{i}"] = vault_responses
+        else:
+            # Original behavior for plain string questions
+            response = Prompt.ask(f"[cyan]{i}.[/cyan] {question}")
+            responses[f"q{i}"] = response
 
     return responses
+
+
+def _collect_vault_path_responses(suggestions: list[dict]) -> dict[str, str]:
+    """Interactive step-by-step Vault path confirmation.
+
+    Flow:
+    1. Show summary table of all suggestions
+    2. Ask confirm/edit
+    3. If edit: step through each variable one by one with pre-filled defaults
+    4. Show final summary and ask confirm/edit again
+    5. Return final mappings as {env_var: vault_path}
+
+    Args:
+        suggestions: List of suggestion dicts with keys:
+            - env_var: Environment variable name
+            - suggested_path: Vault path (without key)
+            - key: Key within the Vault path
+            - confidence: Confidence score (0.0-1.0)
+            - vault_reference: Full path#key reference
+
+    Returns:
+        Dict mapping env_var names to confirmed vault_reference paths.
+    """
+    # Build initial paths from suggestions
+    paths = {}
+    for s in suggestions:
+        paths[s["env_var"]] = s.get("vault_reference") or f"{s['suggested_path']}#{s['key']}"
+
+    while True:
+        # Display summary table
+        _display_vault_suggestions_table(suggestions, paths)
+
+        # Ask confirm/edit
+        choice = Prompt.ask(
+            "\nAccept all suggestions?",
+            choices=["confirm", "edit"],
+            default="confirm"
+        )
+
+        if choice == "confirm":
+            return paths
+
+        # Edit mode: step through each variable
+        console.print("\n[dim]Press Enter to accept the suggested path, or type a new path.[/dim]\n")
+
+        for idx, s in enumerate(suggestions, 1):
+            env_var = s["env_var"]
+            current_path = paths[env_var]
+
+            new_path = Prompt.ask(
+                f"[cyan][{idx}/{len(suggestions)}][/cyan] {env_var}",
+                default=current_path
+            )
+            paths[env_var] = new_path
+
+        # After editing all, show final summary (loop back to top)
+        console.print()  # Blank line before showing table again
+
+
+def _display_vault_suggestions_table(suggestions: list[dict], paths: dict[str, str]):
+    """Display Vault path suggestions in a formatted table.
+
+    Args:
+        suggestions: Original suggestions with confidence info.
+        paths: Current path mappings (may differ from original suggestions).
+    """
+    table = Table(title="Vault Path Configuration")
+    table.add_column("Variable", style="cyan")
+    table.add_column("Path", style="green")
+    table.add_column("Confidence", justify="right")
+
+    for s in suggestions:
+        env_var = s["env_var"]
+        current_path = paths.get(env_var, "")
+        original_path = s.get("vault_reference") or f"{s['suggested_path']}#{s['key']}"
+
+        # Show confidence for original suggestion, or "custom" if user changed it
+        if current_path == original_path:
+            confidence = s.get("confidence", 0)
+            if confidence >= 0.9:
+                conf_str = "[green]validated[/green]"
+            elif confidence >= 0.5:
+                conf_str = f"[yellow]{int(confidence * 100)}%[/yellow]"
+            else:
+                conf_str = f"[red]{int(confidence * 100)}%[/red]"
+        else:
+            conf_str = "[blue]custom[/blue]"
+
+        table.add_row(env_var, current_path, conf_str)
+
+    console.print()
+    console.print(table)
+
+
+def _extract_vault_updates(responses: dict[str, Any]) -> list[dict] | None:
+    """Extract vault path updates from user responses.
+
+    Looks for structured vault path responses (dicts) and converts them
+    to the vault_suggestions format for state update.
+
+    Args:
+        responses: User responses dict, where some values may be dicts
+                   from the interactive vault path flow.
+
+    Returns:
+        List of suggestion dicts ready for vault_suggestions state, or None
+        if no vault path responses found.
+    """
+    vault_updates = []
+
+    for key, value in responses.items():
+        if isinstance(value, dict):
+            # This is a structured vault path response
+            for env_var, path in value.items():
+                # Parse path#key format
+                if "#" in path:
+                    path_part, key_part = path.rsplit("#", 1)
+                else:
+                    path_part = path
+                    key_part = ""
+
+                vault_updates.append({
+                    "env_var": env_var,
+                    "suggested_path": path_part,
+                    "key": key_part,
+                    "vault_reference": path,
+                    "confidence": 1.0,  # User confirmed
+                })
+
+    return vault_updates if vault_updates else None
 
 
 def _collect_deployment_prompt(analysis: dict) -> str:

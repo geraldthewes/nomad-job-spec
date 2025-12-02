@@ -130,24 +130,17 @@ def generate_questions_node(state: dict[str, Any]) -> dict[str, Any]:
         questions.append("What Docker image should be used for this deployment?")
 
     # Enhanced environment variable question with Vault suggestions
+    # Uses structured dict for interactive step-by-step confirmation
     env_vars = analysis.get("env_vars_required", [])
     if env_vars:
         suggestions = vault_suggestions.get("suggestions", [])
         if suggestions:
-            # Build a helpful question with Vault path suggestions
-            suggestion_lines = []
-            for s in suggestions[:5]:
-                conf = f" ({int(s['confidence']*100)}% confidence)" if s['confidence'] < 0.9 else ""
-                suggestion_lines.append(
-                    f"  - {s['env_var']}: {s['suggested_path']}#{s['key']}{conf}"
-                )
-
-            questions.append(
-                f"The following environment variables were detected with Vault path suggestions:\n"
-                + "\n".join(suggestion_lines) +
-                "\n\nConfirm these paths or provide alternatives. "
-                "Enter 'confirm' to use suggestions, or specify custom paths."
-            )
+            # Structured question for interactive Vault path confirmation
+            questions.append({
+                "type": "vault_paths",
+                "suggestions": suggestions[:10],  # Limit to first 10
+                "prompt": "Environment variable Vault paths",
+            })
         else:
             questions.append(
                 f"The following environment variables were detected: {', '.join(env_vars[:5])}. "
