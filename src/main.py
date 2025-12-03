@@ -225,6 +225,9 @@ def generate(
                 prompt = f"Deploy using {selected_dockerfile}" if selected_dockerfile else "Deploy this application"
                 graph.update_state(config, {"prompt": prompt})
 
+            # Display configuration summary after enrichment
+            _display_configuration_summary(current_state.values)
+
             if not no_questions and current_state.values.get("questions"):
                 # Display questions and collect responses
                 responses = _collect_user_responses(current_state.values)
@@ -489,6 +492,135 @@ def _display_env_config_table(configs: list[dict]):
             conf_str = f"[red]{int(confidence * 100)}%[/red]"
 
         table.add_row(var_name, source_str, value, conf_str)
+
+    console.print()
+    console.print(table)
+
+
+def _display_configuration_summary(state: dict):
+    """Display comprehensive configuration summary before user confirmation.
+
+    Shows all tracked values including job metadata, Docker config, resources,
+    network settings, service configuration, and Vault integration.
+
+    Args:
+        state: Current graph state with codebase_analysis and enrichment data.
+    """
+    analysis = state.get("codebase_analysis", {})
+    fabio = state.get("fabio_validation", {})
+    vault_suggestions = state.get("vault_suggestions", {})
+    env_var_configs = state.get("env_var_configs", [])
+
+    # Main configuration table
+    table = Table(title="Configuration Summary")
+    table.add_column("Property", style="cyan", width=20)
+    table.add_column("Value", style="green")
+    table.add_column("Source", style="dim", justify="right")
+
+    # Job metadata
+    job_name = state.get("job_name") or analysis.get("project_name") or "unknown"
+    table.add_row("Job Name", job_name, "derived")
+
+    # Docker image
+    docker_image = analysis.get("docker_image", "")
+    if docker_image:
+        # Truncate long image names for display
+        display_image = docker_image if len(docker_image) <= 50 else docker_image[:47] + "..."
+        table.add_row("Docker Image", display_image, "analysis")
+    else:
+        table.add_row("Docker Image", "[dim]not specified[/dim]", "-")
+
+    # Service type and resources
+    service_type = analysis.get("service_type", "MEDIUM")
+    resources = analysis.get("resources", {})
+    cpu = resources.get("cpu", "-")
+    memory = resources.get("memory", "-")
+
+    table.add_row("Service Type", service_type, "analysis")
+    table.add_row("CPU", f"{cpu} MHz" if cpu != "-" else "-", service_type)
+    table.add_row("Memory", f"{memory} MB" if memory != "-" else "-", service_type)
+
+    # Ports
+    ports = analysis.get("ports", [])
+    if ports:
+        port_strs = []
+        for p in ports:
+            if isinstance(p, dict):
+                port_strs.append(f"{p.get('name', 'http')}:{p.get('container_port', '?')}")
+            else:
+                port_strs.append(str(p))
+        table.add_row("Ports", ", ".join(port_strs), "analysis")
+    else:
+        table.add_row("Ports", "[dim]none detected[/dim]", "-")
+
+    # Health check
+    health_check = analysis.get("health_check", {})
+    if health_check:
+        hc_type = health_check.get("type", "http")
+        hc_path = health_check.get("path", "/health")
+        table.add_row("Health Check", f"{hc_type.upper()} {hc_path}", "analysis")
+    else:
+        table.add_row("Health Check", "[dim]none[/dim]", "-")
+
+    # Fabio routing
+    if fabio:
+        hostname = fabio.get("hostname", "")
+        path = fabio.get("path", "")
+        strip = fabio.get("strip_path", False)
+        if hostname:
+            route_str = hostname
+            if path:
+                route_str += path
+            if strip:
+                route_str += " [dim](strip)[/dim]"
+            table.add_row("Fabio Route", route_str, "enrichment")
+        elif path:
+            route_str = path
+            if strip:
+                route_str += " [dim](strip)[/dim]"
+            table.add_row("Fabio Route", route_str, "enrichment")
+    else:
+        table.add_row("Fabio Route", "[dim]none[/dim]", "-")
+
+    # Vault integration
+    secrets = analysis.get("secrets", [])
+    if secrets:
+        table.add_row("Vault Secrets", f"{len(secrets)} variables", "analysis")
+    elif vault_suggestions:
+        table.add_row("Vault Secrets", f"{len(vault_suggestions)} suggested", "enrichment")
+    else:
+        table.add_row("Vault Secrets", "[dim]none[/dim]", "-")
+
+    # Environment variables summary
+    if env_var_configs:
+        fixed_count = sum(1 for c in env_var_configs if c.get("source") == "fixed")
+        consul_count = sum(1 for c in env_var_configs if c.get("source") == "consul")
+        vault_count = sum(1 for c in env_var_configs if c.get("source") == "vault")
+        parts = []
+        if fixed_count:
+            parts.append(f"{fixed_count} fixed")
+        if consul_count:
+            parts.append(f"{consul_count} consul")
+        if vault_count:
+            parts.append(f"{vault_count} vault")
+        table.add_row("Env Variables", ", ".join(parts) if parts else "0", "enrichment")
+    else:
+        env_vars = analysis.get("env_vars", {})
+        if env_vars:
+            table.add_row("Env Variables", f"{len(env_vars)} detected", "analysis")
+        else:
+            table.add_row("Env Variables", "[dim]none[/dim]", "-")
+
+    # Architecture requirements
+    requires_amd64 = analysis.get("requires_amd64", False)
+    if requires_amd64:
+        table.add_row("Architecture", "AMD64 required", "analysis")
+
+    # Storage requirements
+    requires_storage = analysis.get("requires_storage", False)
+    if requires_storage:
+        storage_path = analysis.get("storage_path", "/data")
+        table.add_row("Storage", f"CSI volume at {storage_path}", "analysis")
 
     console.print()
     console.print(table)
