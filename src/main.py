@@ -22,6 +22,50 @@ from src.graph import compile_graph, create_initial_state
 from src.observability import get_observability
 from src.tools.infra_status import InfraHealthReport, check_infrastructure_from_settings
 
+
+class UserQuitException(Exception):
+    """Raised when user types 'quit' to exit the application."""
+    pass
+
+
+def prompt_with_quit(
+    prompt_text: str,
+    choices: list[str] | None = None,
+    default: str | None = None,
+    **kwargs,
+) -> str:
+    """Wrapper around Prompt.ask that checks for 'quit' command.
+
+    Args:
+        prompt_text: The prompt to display.
+        choices: Optional list of valid choices.
+        default: Optional default value.
+        **kwargs: Additional arguments passed to Prompt.ask.
+
+    Returns:
+        User's response.
+
+    Raises:
+        UserQuitException: If user types 'quit' or 'q'.
+    """
+    # Add quit hint to prompt
+    quit_hint = "[dim](type 'quit' to exit)[/dim]"
+    full_prompt = f"{prompt_text} {quit_hint}"
+
+    # If we have choices, temporarily allow 'quit' and 'q'
+    if choices:
+        extended_choices = list(choices) + ["quit", "q"]
+        response = Prompt.ask(full_prompt, choices=extended_choices, default=default, **kwargs)
+    else:
+        response = Prompt.ask(full_prompt, default=default, **kwargs)
+
+    # Check for quit
+    if response.lower() in ("quit", "q"):
+        raise UserQuitException()
+
+    return response
+
+
 app = typer.Typer(
     name="nomad-spec",
     help="AI-powered Nomad job specification generator",
@@ -162,26 +206,50 @@ def generate(
     )
 
     # Run graph with HitL for questions
-    config = {"configurable": {"thread_id": f"session-{cluster_id}"}}
+    # Set up LangFuse callback handler for proper trace nesting
+    langfuse_handler = None
+    langfuse_client = None
+    if obs.is_enabled():
+        try:
+            from langfuse.langchain import CallbackHandler
+            from langfuse import get_client
+
+            langfuse_handler = CallbackHandler()
+            langfuse_client = get_client()
+        except Exception as e:
+            logger.warning(f"Failed to create Langfuse callback handler: {e}")
+
+    # Include callback handler in config for all stream() calls
+    # This enables proper nesting of LLM calls under LangGraph nodes
+    config = {
+        "configurable": {"thread_id": f"session-{cluster_id}"},
+        "callbacks": [langfuse_handler] if langfuse_handler else [],
+    }
 
     # Use ExitStack to manage Langfuse tracing context
     from contextlib import ExitStack
 
     try:
         with ExitStack() as stack:
-            # Set up Langfuse attribute propagation if enabled
-            # This propagates session_id and tags to all traces created within this context
-            if obs.is_enabled():
+            # Set up root observation for entire graph execution
+            # This creates a single trace containing all nodes and LLM calls
+            if langfuse_client is not None:
                 try:
-                    from langfuse import propagate_attributes
-
-                    # Propagate session_id and tags to all traces (each node gets its own trace)
-                    stack.enter_context(propagate_attributes(
+                    root_span = stack.enter_context(
+                        langfuse_client.start_as_current_observation(
+                            as_type="span",
+                            name="nomad-job-spec-generation",
+                        )
+                    )
+                    # Set trace metadata
+                    root_span.update_trace(
                         session_id=session_id,
                         tags=["nomad-job-spec"],
-                    ))
+                        input={"codebase_path": str(codebase_path), "prompt": prompt or ""},
+                    )
                 except Exception as e:
-                    logger.warning(f"Failed to set up Langfuse attribute propagation: {e}")
+                    logger.warning(f"Failed to set up Langfuse root observation: {e}")
+
             # First run - discover sources and analyze build system
             with console.status("[bold green]Analyzing build system..."):
                 for event in graph.stream(state, config):
@@ -275,6 +343,22 @@ def generate(
             final_state = graph.get_state(config)
             result = final_state.values
 
+            # Update root span with output before context exits
+            if langfuse_client is not None:
+                try:
+                    root_span.update_trace(
+                        output={
+                            "job_name": result.get("job_name"),
+                            "hcl_valid": result.get("hcl_valid"),
+                            "job_spec_length": len(result.get("job_spec", "")),
+                        }
+                    )
+                except Exception:
+                    pass  # Best effort
+
+    except UserQuitException:
+        console.print("\n[dim]Exiting at user request.[/dim]")
+        raise typer.Exit(code=0)
     except Exception as e:
         console.print(f"[red]Error during execution:[/red] {e}")
         if verbose:
@@ -400,7 +484,7 @@ def _collect_user_responses_from_questions(questions: list, app_name: str = "app
                     if desc:
                         console.print(f"      [dim]{desc}[/dim]")
                 default_val = question.get("default", "bridge")
-                choice = Prompt.ask(
+                choice = prompt_with_quit(
                     "\nSelect network mode",
                     choices=[opt["value"] for opt in options],
                     default=default_val,
@@ -437,11 +521,11 @@ def _collect_user_responses_from_questions(questions: list, app_name: str = "app
                 responses[f"q{i}"] = vault_responses
             else:
                 # Unknown structured question type, ask as string
-                response = Prompt.ask(f"[cyan]{i}.[/cyan] {question}")
+                response = prompt_with_quit(f"[cyan]{i}.[/cyan] {question}")
                 responses[f"q{i}"] = response
         else:
             # Original behavior for plain string questions
-            response = Prompt.ask(f"[cyan]{i}.[/cyan] {question}")
+            response = prompt_with_quit(f"[cyan]{i}.[/cyan] {question}")
             responses[f"q{i}"] = response
 
     return responses
@@ -534,7 +618,7 @@ def _collect_env_config_responses(
         _display_env_config_table(current_configs)
 
         # Ask confirm/edit
-        choice = Prompt.ask(
+        choice = prompt_with_quit(
             "\nAccept all suggestions?",
             choices=["confirm", "edit"],
             default="confirm"
@@ -551,7 +635,7 @@ def _collect_env_config_responses(
             console.print(f"[cyan][{idx}/{len(current_configs)}][/cyan] [bold]{var_name}[/bold]")
 
             # Ask for source type
-            new_source = Prompt.ask(
+            new_source = prompt_with_quit(
                 "  Source",
                 choices=["fixed", "consul", "vault"],
                 default=cfg["source"]
@@ -565,7 +649,7 @@ def _collect_env_config_responses(
             else:
                 hint = "Vault path (e.g., secret/data/.../key)"
 
-            new_value = Prompt.ask(
+            new_value = prompt_with_quit(
                 f"  {hint}",
                 default=cfg["value"]
             )
@@ -927,7 +1011,7 @@ def _collect_dockerfile_confirmation(state: dict) -> str | None:
             console.print(f"  Mechanism: [cyan]{mechanism}[/cyan]")
             console.print(f"  Dockerfile: [cyan]{dockerfile_rel}[/cyan]")
 
-            confirm = Prompt.ask(
+            confirm = prompt_with_quit(
                 "\n[bold cyan]Use this Dockerfile?[/bold cyan]",
                 choices=["y", "n"],
                 default="y"
@@ -963,7 +1047,7 @@ def _manual_dockerfile_selection(dockerfiles: list[str]) -> str | None:
     if len(dockerfiles) == 1:
         dockerfile = dockerfiles[0]
         console.print(f"\n[bold]Found Dockerfile:[/bold] [cyan]{dockerfile}[/cyan]")
-        confirm = Prompt.ask(
+        confirm = prompt_with_quit(
             "[bold cyan]Use this Dockerfile?[/bold cyan]",
             choices=["y", "n"],
             default="y"
@@ -982,7 +1066,7 @@ def _manual_dockerfile_selection(dockerfiles: list[str]) -> str | None:
     console.print()
 
     while True:
-        choice = Prompt.ask(
+        choice = prompt_with_quit(
             "[bold cyan]Select Dockerfile to deploy[/bold cyan]",
             default="1"
         )
