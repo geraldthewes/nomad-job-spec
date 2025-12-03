@@ -223,7 +223,10 @@ class ObservabilityManager:
         input: Any = None,
         metadata: dict[str, Any] | None = None,
     ):
-        """Context manager for creating a span within a trace.
+        """Context manager for creating a span nested under current observation.
+
+        Uses Langfuse's context-aware span creation to automatically nest spans
+        under the current trace/observation (e.g., LangGraph node spans).
 
         Usage:
             with obs.span("parse_dockerfile", input={"path": dockerfile_path}) as span:
@@ -232,8 +235,8 @@ class ObservabilityManager:
 
         Args:
             name: Name for the span (e.g., "parse_dockerfile", "query_vault").
-            trace: Parent span/trace object. If None, creates a new root span.
-            parent: Parent span for nesting (alias for trace).
+            trace: Deprecated - ignored, uses automatic context nesting.
+            parent: Deprecated - ignored, uses automatic context nesting.
             input: Input data to record with the span.
             metadata: Additional metadata for the span.
 
@@ -247,10 +250,6 @@ class ObservabilityManager:
             yield _NoOpSpan()
             return
 
-        # Use parent if provided, otherwise use trace
-        parent_span = parent or trace
-        span_obj = None
-
         try:
             # Build span kwargs
             span_kwargs: dict[str, Any] = {"name": name}
@@ -259,33 +258,24 @@ class ObservabilityManager:
             if metadata:
                 span_kwargs["metadata"] = metadata
 
-            # Create span - either as child of parent or as new root
-            if parent_span is not None and hasattr(parent_span, "start_span"):
-                # parent_span might be a _SpanWrapper, which returns a wrapped span
-                raw_or_wrapped = parent_span.start_span(**span_kwargs)
-                if isinstance(raw_or_wrapped, _SpanWrapper):
-                    wrapped_span = raw_or_wrapped
-                else:
-                    wrapped_span = _SpanWrapper(raw_or_wrapped)
-            else:
-                # Create new root span (implicitly creates trace)
-                raw_span = client.start_span(**span_kwargs)
-                wrapped_span = _SpanWrapper(raw_span)
+            # Use context-aware span creation for automatic nesting under
+            # the current observation (LangGraph node, parent span, etc.)
+            with client.start_as_current_span(**span_kwargs) as raw_span:
+                # context_managed=True: wrapper.end() only updates, context manager ends
+                wrapped_span = _SpanWrapper(raw_span, context_managed=True)
+                try:
+                    yield wrapped_span
+                except Exception as e:
+                    # Record error in span (update only, context manager handles end)
+                    wrapped_span.end(
+                        level="ERROR",
+                        status_message=str(e),
+                    )
+                    raise
 
         except Exception as e:
             logger.warning(f"Failed to create span '{name}': {e}")
             yield _NoOpSpan()
-            return
-
-        try:
-            yield wrapped_span
-        except Exception as e:
-            # Record error in span
-            wrapped_span.end(
-                level="ERROR",
-                status_message=str(e),
-            )
-            raise
 
     def traced(
         self,
@@ -361,13 +351,14 @@ class _SpanWrapper:
     In LangFuse v3+, end() only accepts end_time. This wrapper allows
     passing output, level, status_message etc. to end() for convenience.
 
-    Optionally manages a context manager for spans created via
-    start_as_current_observation.
+    When context_managed=True, end() only updates the span (the context
+    manager handles actual ending to prevent double-end errors).
     """
 
-    def __init__(self, span: Any, ctx_manager: Any = None):
+    def __init__(self, span: Any, context_managed: bool = False):
         self._span = span
-        self._ctx_manager = ctx_manager
+        self._context_managed = context_managed
+        self._ended = False
 
     def end(
         self,
@@ -378,10 +369,10 @@ class _SpanWrapper:
     ) -> None:
         """End the span with optional output, level, and status_message.
 
-        In v3+, we call update() first to set these values, then end().
-        If a context manager was provided, we exit it properly.
+        When context_managed=True, only updates the span (context manager
+        handles ending). Otherwise calls update() then end().
         """
-        if self._span is None:
+        if self._span is None or self._ended:
             return
 
         # Build update kwargs for any non-None values
@@ -397,16 +388,10 @@ class _SpanWrapper:
         if update_kwargs and hasattr(self._span, "update"):
             self._span.update(**update_kwargs)
 
-        # Exit the context manager if we have one (this also ends the span)
-        if self._ctx_manager is not None:
-            try:
-                self._ctx_manager.__exit__(None, None, None)
-            except Exception:
-                pass  # Ignore errors during context exit
-            self._ctx_manager = None
-        elif hasattr(self._span, "end"):
-            # Fall back to direct end() if no context manager
+        # Only call end() if not context-managed (context manager handles it)
+        if not self._context_managed and hasattr(self._span, "end"):
             self._span.end()
+            self._ended = True
 
     def start_span(self, **kwargs: Any) -> "_SpanWrapper":
         """Create a child span."""
