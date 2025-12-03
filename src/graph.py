@@ -11,6 +11,7 @@ from langchain_core.messages import BaseMessage
 
 from src.nodes.analyze import create_analyze_node
 from src.nodes.analyze_build_system import create_analyze_build_system_node
+from src.nodes.analyze_ports import create_analyze_ports_node
 from src.nodes.discover import (
     create_select_node,
     should_select_dockerfile,
@@ -87,6 +88,9 @@ class AgentState(dict):
     merged_extraction: dict[str, Any]  # Combined extraction with priority
     extraction_sources: dict[str, dict[str, Any]]  # Field -> source attribution
 
+    # Port configurability analysis (from analyze_ports node)
+    port_analysis: dict[str, Any]  # Port env var mappings and warnings
+
 
 def create_initial_state(
     codebase_path: str,
@@ -143,6 +147,8 @@ def create_initial_state(
         "extractions": [],
         "merged_extraction": {},
         "extraction_sources": {},
+        # Port configurability analysis
+        "port_analysis": {},
     }
 
 
@@ -202,11 +208,12 @@ def create_workflow(
     """Create the LangGraph workflow for job spec generation.
 
     Workflow with source discovery and extraction:
-    START -> discover_sources -> [select] -> analyze_build_system -> extract -> merge -> analyze -> enrich -> question -> collect -> generate -> validate -> deploy -> verify
+    START -> discover_sources -> [select] -> analyze_build_system -> extract -> merge -> analyze_ports -> analyze -> enrich -> question -> collect -> generate -> validate -> deploy -> verify
 
     The select node is skipped if only one Dockerfile exists (via conditional edge).
     The analyze_build_system node uses LLM to understand how images are built.
     The extract/merge nodes run extractors on discovered sources (build.yaml, Makefile, etc.).
+    The analyze_ports node determines port configurability for Nomad dynamic port allocation.
 
     Args:
         llm: LLM instance for analysis and generation.
@@ -225,6 +232,7 @@ def create_workflow(
     analyze_build_system_node = create_analyze_build_system_node(llm)
     extract_node = create_extract_node()
     merge_node = create_merge_node()
+    analyze_ports_node = create_analyze_ports_node(llm)
     analyze_node = create_analyze_node(llm)
     enrich_node = create_enrich_node(settings)
     question_node = create_question_node()
@@ -242,6 +250,7 @@ def create_workflow(
     workflow.add_node("analyze_build_system", analyze_build_system_node)
     workflow.add_node("extract", extract_node)
     workflow.add_node("merge", merge_node)
+    workflow.add_node("analyze_ports", analyze_ports_node)
     workflow.add_node("analyze", analyze_node)
     workflow.add_node("enrich", enrich_node)
     workflow.add_node("question", question_node)
@@ -265,7 +274,8 @@ def create_workflow(
     workflow.add_edge("analyze_build_system", "extract")
 
     workflow.add_edge("extract", "merge")
-    workflow.add_edge("merge", "analyze")
+    workflow.add_edge("merge", "analyze_ports")
+    workflow.add_edge("analyze_ports", "analyze")
     workflow.add_edge("analyze", "enrich")
     workflow.add_edge("enrich", "question")
     workflow.add_edge("question", "collect")

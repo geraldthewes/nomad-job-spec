@@ -360,6 +360,19 @@ def _build_generation_context(
             f"Vault format: {vault_format} ({'use native vault env stanza' if vault_format == 'env_stanza' else 'use template blocks'})",
         ])
 
+    # Add port env var mappings (from port analysis)
+    # These are Nomad runtime variables that MUST be used
+    nomad_vars = [c for c in (env_var_configs or []) if c.get("source") == "nomad"]
+    if nomad_vars:
+        parts.extend([
+            "",
+            "## Port Environment Variables (Nomad Runtime)",
+            "IMPORTANT: These env vars MUST use Nomad dynamic port variables:",
+        ])
+        for c in nomad_vars:
+            parts.append(f"  - {c['name']} = \"{c['value']}\"")
+        parts.append("Do NOT use fixed values for these - use the ${NOMAD_PORT_*} references.")
+
     if memories:
         parts.extend([
             "",
@@ -494,6 +507,10 @@ def _build_job_config(
                 consul_vars[name] = value
             elif source == "vault":
                 vault_secrets[name] = value
+            elif source == "nomad":
+                # Nomad runtime variables (e.g., ${NOMAD_PORT_http})
+                # These go directly into env_vars
+                env_vars[name] = value
     else:
         # Fallback to LLM-provided values
         env_vars = config_dict.get("env_vars", {})

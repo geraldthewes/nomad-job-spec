@@ -17,6 +17,10 @@ class PortConfig:
     container_port: int
     static: bool = False
     host_port: int | None = None
+    # Port configurability fields (from analyze_ports node)
+    is_configurable: bool | None = None  # None = unknown
+    env_var: str | None = None  # e.g., "APP_PORT"
+    default_value: int | None = None
 
 
 @dataclass
@@ -119,6 +123,9 @@ class ExtractionResult:
                     "container_port": p.container_port,
                     "static": p.static,
                     "host_port": p.host_port,
+                    "is_configurable": p.is_configurable,
+                    "env_var": p.env_var,
+                    "default_value": p.default_value,
                 }
                 for p in self.ports
             ]
