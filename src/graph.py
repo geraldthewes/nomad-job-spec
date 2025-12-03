@@ -12,9 +12,9 @@ from langchain_core.messages import BaseMessage
 from src.nodes.analyze import create_analyze_node
 from src.nodes.analyze_build_system import create_analyze_build_system_node
 from src.nodes.analyze_ports import create_analyze_ports_node
-from src.nodes.discover import (
-    create_select_node,
-    should_select_dockerfile,
+from src.nodes.confirm_dockerfile import (
+    create_confirm_node,
+    should_confirm_dockerfile,
 )
 from src.nodes.discover_sources import create_discover_sources_node
 from src.nodes.extract import create_extract_node
@@ -208,10 +208,11 @@ def create_workflow(
     """Create the LangGraph workflow for job spec generation.
 
     Workflow with source discovery and extraction:
-    START -> discover_sources -> [select] -> analyze_build_system -> extract -> merge -> analyze_ports -> analyze -> enrich -> question -> collect -> generate -> validate -> deploy -> verify
+    START -> discover_sources -> analyze_build_system -> [confirm] -> extract -> merge -> analyze_ports -> analyze -> enrich -> question -> collect -> generate -> validate -> deploy -> verify
 
-    The select node is skipped if only one Dockerfile exists (via conditional edge).
-    The analyze_build_system node uses LLM to understand how images are built.
+    The analyze_build_system node uses LLM to understand how images are built AND
+    identifies which Dockerfile is used. The confirm node then lets the user confirm
+    or override this finding.
     The extract/merge nodes run extractors on discovered sources (build.yaml, Makefile, etc.).
     The analyze_ports node determines port configurability for Nomad dynamic port allocation.
 
@@ -228,7 +229,7 @@ def create_workflow(
 
     # Create node functions
     discover_sources_node = create_discover_sources_node()
-    select_node = create_select_node()
+    confirm_node = create_confirm_node()
     analyze_build_system_node = create_analyze_build_system_node(llm)
     extract_node = create_extract_node()
     merge_node = create_merge_node()
@@ -246,8 +247,8 @@ def create_workflow(
 
     # Add nodes
     workflow.add_node("discover_sources", discover_sources_node)
-    workflow.add_node("select", select_node)
     workflow.add_node("analyze_build_system", analyze_build_system_node)
+    workflow.add_node("confirm", confirm_node)
     workflow.add_node("extract", extract_node)
     workflow.add_node("merge", merge_node)
     workflow.add_node("analyze_ports", analyze_ports_node)
@@ -258,20 +259,22 @@ def create_workflow(
     workflow.add_node("generate", generate_node)
     workflow.add_node("validate", validate_node)
 
-    # Flow: discover_sources -> [select] -> analyze_build_system -> extract -> merge -> analyze -> enrich -> question -> collect -> generate -> validate
+    # Flow: discover_sources -> analyze_build_system -> [confirm] -> extract -> merge -> analyze -> enrich -> question -> collect -> generate -> validate
+    # The new flow has build system analysis BEFORE Dockerfile confirmation, so the LLM
+    # identifies which Dockerfile is actually used, and the user confirms that finding.
     workflow.add_edge(START, "discover_sources")
+    workflow.add_edge("discover_sources", "analyze_build_system")
 
-    # Conditional: skip selection if only 1 Dockerfile or none
+    # Conditional: confirm Dockerfile identified by build system analysis
     workflow.add_conditional_edges(
-        "discover_sources",
-        should_select_dockerfile,
+        "analyze_build_system",
+        should_confirm_dockerfile,
         {
-            "select": "select",
-            "skip": "analyze_build_system",
+            "confirm": "confirm",
+            "skip": "extract",
         },
     )
-    workflow.add_edge("select", "analyze_build_system")
-    workflow.add_edge("analyze_build_system", "extract")
+    workflow.add_edge("confirm", "extract")
 
     workflow.add_edge("extract", "merge")
     workflow.add_edge("merge", "analyze_ports")
@@ -358,10 +361,10 @@ def compile_graph(
 
     if enable_checkpointing:
         checkpointer = MemorySaver()
-        # Interrupt before select (Dockerfile) and collect (questions) for HitL
+        # Interrupt before confirm (Dockerfile) and collect (questions) for HitL
         return workflow.compile(
             checkpointer=checkpointer,
-            interrupt_before=["select", "collect"],
+            interrupt_before=["confirm", "collect"],
         )
     else:
         return workflow.compile()

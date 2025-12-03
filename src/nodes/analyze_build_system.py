@@ -26,6 +26,7 @@ _FALLBACK_PROMPT = """You are analyzing a codebase to understand how Docker imag
 Your task is to examine the provided files and determine:
 1. What build mechanism/tool is used (jobforge, docker build, docker-compose, or other)
 2. Where the build configuration file is located (the path to the actual config)
+3. Which Dockerfile is being built by the build system
 
 ## Build Mechanisms
 
@@ -39,7 +40,8 @@ Your task is to examine the provided files and determine:
 1. If a Makefile exists, analyze it first - it often orchestrates the build
 2. Look for commands that trigger builds (make build, docker build, jobforge, etc.)
 3. Trace any file references to find the actual configuration
-4. If no Makefile, check if build files exist directly (build.yaml, docker-compose.yml)
+4. **Identify which Dockerfile is used**: Look for `-f` flags in docker build commands, or `dockerfile:` keys in build.yaml/docker-compose.yml
+5. If no Makefile, check if build files exist directly (build.yaml, docker-compose.yml)
 
 ## Output Format
 
@@ -48,15 +50,22 @@ Respond with a JSON object:
 {
     "mechanism": "jobforge|docker|docker-compose|other",
     "config_path": "path/to/config/file",
+    "dockerfile_used": "path/to/Dockerfile",
     "reasoning": "Brief explanation of how you determined this"
 }
 ```
+
+**dockerfile_used**: The Dockerfile path referenced by the build system. Examples:
+- If Makefile has `docker build -f docker/Dockerfile.prod .` → `"dockerfile_used": "docker/Dockerfile.prod"`
+- If build.yaml has `dockerfile: Dockerfile` → `"dockerfile_used": "Dockerfile"`
+- If no explicit Dockerfile specified, assume `"dockerfile_used": "Dockerfile"` (Docker default)
 
 If you cannot determine the build mechanism, use:
 ```json
 {
     "mechanism": "unknown",
     "config_path": null,
+    "dockerfile_used": null,
     "reasoning": "Explanation of why it couldn't be determined"
 }
 ```
@@ -145,6 +154,7 @@ def analyze_build_system_node(
     default_result = {
         "mechanism": "unknown",
         "config_path": None,
+        "dockerfile_used": None,
         "reasoning": "Could not analyze build system",
         "fallback_used": True,
     }
@@ -228,6 +238,7 @@ def analyze_build_system_node(
                 # Ensure required fields
                 result.setdefault("mechanism", "unknown")
                 result.setdefault("config_path", None)
+                result.setdefault("dockerfile_used", None)
                 result.setdefault("reasoning", "")
                 result["fallback_used"] = False
 
@@ -235,9 +246,14 @@ def analyze_build_system_node(
                 if result["config_path"] and not Path(result["config_path"]).is_absolute():
                     result["config_path"] = str(Path(codebase_path) / result["config_path"])
 
+                # Resolve relative dockerfile_used to absolute
+                if result["dockerfile_used"] and not Path(result["dockerfile_used"]).is_absolute():
+                    result["dockerfile_used"] = str(Path(codebase_path) / result["dockerfile_used"])
+
                 span.end(output={
                     "mechanism": result["mechanism"],
                     "config_path": result["config_path"],
+                    "dockerfile_used": result["dockerfile_used"],
                 })
             else:
                 logger.warning("Could not parse JSON from LLM response")
@@ -263,7 +279,8 @@ def analyze_build_system_node(
 
     logger.info(
         f"Build system analysis: mechanism={result.get('mechanism')}, "
-        f"config_path={result.get('config_path')}"
+        f"config_path={result.get('config_path')}, "
+        f"dockerfile_used={result.get('dockerfile_used')}"
     )
 
     return {

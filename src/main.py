@@ -181,26 +181,33 @@ def generate(
                     ))
                 except Exception as e:
                     logger.warning(f"Failed to set up Langfuse attribute propagation: {e}")
-            # First run - discover Dockerfiles
-            with console.status("[bold green]Discovering Dockerfiles..."):
+            # First run - discover sources and analyze build system
+            with console.status("[bold green]Analyzing build system..."):
                 for event in graph.stream(state, config):
                     if verbose:
                         _print_event(event)
 
-                    # Check for interrupt (Dockerfile selection or questions ready)
+                    # Check for interrupt (Dockerfile confirmation or questions ready)
                     if "__interrupt__" in event:
                         break
 
-            # Get current state to check if Dockerfile selection is needed
+            # Get current state to check if Dockerfile confirmation is needed
             current_state = graph.get_state(config)
             dockerfiles = current_state.values.get("dockerfiles_found", [])
             selected = current_state.values.get("selected_dockerfile")
+            build_analysis = current_state.values.get("build_system_analysis", {})
 
-            # Handle Dockerfile selection/confirmation if needed
-            if dockerfiles and not selected and not no_questions:
-                selected = _collect_dockerfile_selection(current_state.values)
+            # Handle Dockerfile confirmation/selection if needed
+            if not selected and not no_questions:
+                selected = _collect_dockerfile_confirmation(current_state.values)
                 if selected:
                     # Merge with full current state to preserve all values
+                    updated_state = {**current_state.values, "selected_dockerfile": selected}
+                    graph.update_state(config, updated_state)
+            elif not selected and no_questions:
+                # Auto-accept in no-questions mode
+                selected = _auto_select_dockerfile(current_state.values)
+                if selected:
                     updated_state = {**current_state.values, "selected_dockerfile": selected}
                     graph.update_state(config, updated_state)
 
@@ -763,22 +770,81 @@ def _extract_vault_updates(responses: dict[str, Any]) -> list[dict] | None:
     return vault_updates if vault_updates else None
 
 
-def _collect_dockerfile_selection(state: dict) -> str | None:
-    """Collect user's Dockerfile selection or confirmation.
+def _collect_dockerfile_confirmation(state: dict) -> str | None:
+    """Collect user's Dockerfile confirmation based on build system analysis.
+
+    This is the new flow where the build system analysis identifies which
+    Dockerfile is used, and the user confirms (or overrides) that finding.
 
     Args:
-        state: Current graph state with dockerfiles_found.
+        state: Current graph state with build_system_analysis and dockerfiles_found.
 
     Returns:
-        Selected Dockerfile path, or None if no Dockerfiles.
+        Confirmed Dockerfile path, or None if no Dockerfiles.
     """
-    dockerfiles = state.get("dockerfiles_found", [])
+    build_analysis = state.get("build_system_analysis", {})
+    dockerfile_identified = build_analysis.get("dockerfile_used")
+    dockerfiles_found = state.get("dockerfiles_found", [])
+    codebase_path = state.get("codebase_path", "")
 
+    if not dockerfiles_found:
+        return None
+
+    # Convert absolute dockerfile_identified to relative for comparison
+    dockerfile_rel = None
+    if dockerfile_identified:
+        try:
+            from pathlib import Path
+            if Path(dockerfile_identified).is_absolute() and codebase_path:
+                dockerfile_rel = str(Path(dockerfile_identified).relative_to(codebase_path))
+            else:
+                dockerfile_rel = dockerfile_identified
+        except ValueError:
+            dockerfile_rel = dockerfile_identified
+
+    if dockerfile_rel:
+        # Check if identified Dockerfile is in the discovered list
+        if dockerfile_rel in dockerfiles_found:
+            # Happy path: LLM identified a known Dockerfile
+            mechanism = build_analysis.get("mechanism", "unknown")
+            console.print(f"\n[bold]Build system analysis:[/bold]")
+            console.print(f"  Mechanism: [cyan]{mechanism}[/cyan]")
+            console.print(f"  Dockerfile: [cyan]{dockerfile_rel}[/cyan]")
+
+            confirm = Prompt.ask(
+                "\n[bold cyan]Use this Dockerfile?[/bold cyan]",
+                choices=["y", "n"],
+                default="y"
+            )
+            if confirm.lower() == "y":
+                console.print(f"[green]Confirmed:[/green] {dockerfile_rel}\n")
+                return dockerfile_rel
+            else:
+                # User rejected - fall through to manual selection
+                console.print("[yellow]Selecting manually...[/yellow]")
+        else:
+            # Mismatch: LLM identified something not in discovery
+            console.print(f"\n[yellow]Warning:[/yellow] Build system references "
+                         f"[cyan]{dockerfile_rel}[/cyan] but it wasn't found in the codebase.")
+            console.print("Falling back to manual selection.\n")
+
+    # Fall back to manual selection from discovered Dockerfiles
+    return _manual_dockerfile_selection(dockerfiles_found)
+
+
+def _manual_dockerfile_selection(dockerfiles: list[str]) -> str | None:
+    """Manually select a Dockerfile from the discovered list.
+
+    Args:
+        dockerfiles: List of discovered Dockerfile paths.
+
+    Returns:
+        Selected Dockerfile path.
+    """
     if len(dockerfiles) == 0:
         return None
 
     if len(dockerfiles) == 1:
-        # Single Dockerfile - ask for confirmation
         dockerfile = dockerfiles[0]
         console.print(f"\n[bold]Found Dockerfile:[/bold] [cyan]{dockerfile}[/cyan]")
         confirm = Prompt.ask(
@@ -813,6 +879,58 @@ def _collect_dockerfile_selection(state: dict) -> str | None:
             console.print(f"[red]Please enter a number between 1 and {len(dockerfiles)}[/red]")
         except ValueError:
             console.print("[red]Please enter a valid number[/red]")
+
+
+def _auto_select_dockerfile(state: dict) -> str | None:
+    """Auto-select Dockerfile for --no-questions mode.
+
+    Prefers LLM-identified Dockerfile if valid, otherwise uses first discovered.
+
+    Args:
+        state: Current graph state.
+
+    Returns:
+        Selected Dockerfile path.
+    """
+    build_analysis = state.get("build_system_analysis", {})
+    dockerfile_identified = build_analysis.get("dockerfile_used")
+    dockerfiles_found = state.get("dockerfiles_found", [])
+    codebase_path = state.get("codebase_path", "")
+
+    if not dockerfiles_found:
+        return None
+
+    # Convert absolute dockerfile_identified to relative for comparison
+    if dockerfile_identified:
+        try:
+            from pathlib import Path
+            if Path(dockerfile_identified).is_absolute() and codebase_path:
+                dockerfile_rel = str(Path(dockerfile_identified).relative_to(codebase_path))
+            else:
+                dockerfile_rel = dockerfile_identified
+
+            if dockerfile_rel in dockerfiles_found:
+                logger.info(f"Auto-selected LLM-identified Dockerfile: {dockerfile_rel}")
+                return dockerfile_rel
+        except ValueError:
+            pass
+
+    # Fall back to first discovered Dockerfile
+    selected = dockerfiles_found[0]
+    logger.info(f"Auto-selected first discovered Dockerfile: {selected}")
+    return selected
+
+
+def _collect_dockerfile_selection(state: dict) -> str | None:
+    """Legacy function - redirects to new confirmation flow.
+
+    Args:
+        state: Current graph state with dockerfiles_found.
+
+    Returns:
+        Selected Dockerfile path, or None if no Dockerfiles.
+    """
+    return _collect_dockerfile_confirmation(state)
 
 
 def _display_analysis_table(analysis):
