@@ -14,6 +14,7 @@ from rich.panel import Panel
 from rich.prompt import Prompt, Confirm
 from rich.syntax import Syntax
 from rich.table import Table
+from langgraph.types import Command
 
 from config.settings import get_settings
 from src.llm.provider import get_llm
@@ -212,16 +213,17 @@ def generate(
                     graph.update_state(config, updated_state)
 
             # Continue to analysis (whether selection was made or skipped)
+            # This runs until the collect node calls interrupt(questions)
             with console.status("[bold green]Analyzing codebase..."):
                 for event in graph.stream(None, config):
                     if verbose:
                         _print_event(event)
 
-                    # Check for interrupt (questions ready)
+                    # Check for interrupt (collect node paused for user input)
                     if "__interrupt__" in event:
                         break
 
-            # Refresh current state after analysis
+            # Get current state - the collect node has interrupted with questions
             current_state = graph.get_state(config)
 
             analysis = current_state.values.get("codebase_analysis", {})
@@ -235,23 +237,37 @@ def generate(
             # Display configuration summary after enrichment
             _display_configuration_summary(current_state.values)
 
-            if not no_questions and current_state.values.get("questions"):
-                # Display questions and collect responses
-                responses = _collect_user_responses(current_state.values)
+            # Get questions from the interrupt value
+            # The collect node called interrupt(questions), so questions are in the interrupt
+            questions = []
+            if current_state.tasks:
+                for task in current_state.tasks:
+                    if task.interrupts:
+                        # The interrupt value is the questions list
+                        questions = task.interrupts[0].value
+                        break
 
-                # Update state with responses and any confirmed vault paths
-                state_updates = {"user_responses": responses}
+            if not no_questions and questions:
+                # Display questions and collect responses
+                responses = _collect_user_responses_from_questions(questions)
 
                 # Check for structured vault path responses and update vault_suggestions
                 vault_updates = _extract_vault_updates(responses)
                 if vault_updates:
-                    state_updates["vault_suggestions"] = {"suggestions": vault_updates}
+                    # Update vault_suggestions in state before resuming
+                    graph.update_state(config, {"vault_suggestions": {"suggestions": vault_updates}})
 
-                graph.update_state(config, state_updates)
-
-                # Continue execution
+                # Resume execution with Command(resume=responses)
+                # This passes responses back to the interrupt() call in collect node
                 with console.status("[bold green]Generating job specification..."):
-                    for event in graph.stream(None, config):
+                    for event in graph.stream(Command(resume=responses), config):
+                        if verbose:
+                            _print_event(event)
+            elif no_questions and questions:
+                # Auto-respond with defaults in no-questions mode
+                responses = _auto_respond_to_questions(questions)
+                with console.status("[bold green]Generating job specification..."):
+                    for event in graph.stream(Command(resume=responses), config):
                         if verbose:
                             _print_event(event)
 
@@ -346,29 +362,74 @@ def validate(
         raise typer.Exit(code=1)
 
 
-def _collect_user_responses(state: dict) -> dict[str, Any]:
+def _collect_user_responses_from_questions(questions: list, app_name: str = "app") -> dict[str, Any]:
     """Collect user responses to generated questions.
 
     Handles both plain string questions and structured questions
-    (like env_configs or vault_paths which use interactive step-by-step flow).
+    (like env_configs, vault_paths, or network_mode which use interactive flows).
+
+    Args:
+        questions: List of questions (strings or dicts with type/prompt/options).
+        app_name: Application name for context in prompts.
+
+    Returns:
+        Dict of responses keyed by question index (q1, q2, etc.).
     """
-    questions = state.get("questions", [])
     responses = {}
 
-    # Get app_name for context in prompts
-    app_name = state.get("app_name", "app")
-
     console.print("\n[bold]Please answer the following questions:[/bold]\n")
+
+    # Track network mode choice to apply to env_configs
+    network_mode_choice = None
+    network_mode_env_var = None
+    network_mode_default_port = None
 
     for i, question in enumerate(questions, 1):
         if isinstance(question, dict):
             q_type = question.get("type")
-            if q_type == "env_configs":
-                # Route to interactive env config handler (new format)
-                env_configs = _collect_env_config_responses(
-                    question["configs"],
-                    app_name,
+            if q_type == "network_mode":
+                # Network mode selection (bridge vs host) - asked FIRST
+                # This determines how APP_PORT is configured in env_configs
+                console.print(f"\n[cyan]{i}.[/cyan] {question['prompt']}\n")
+                options = question.get("options", [])
+                for opt in options:
+                    value = opt.get("value")
+                    label = opt.get("label", value)
+                    desc = opt.get("description", "")
+                    console.print(f"  [bold]{value}[/bold]: {label}")
+                    if desc:
+                        console.print(f"      [dim]{desc}[/dim]")
+                default_val = question.get("default", "bridge")
+                choice = Prompt.ask(
+                    "\nSelect network mode",
+                    choices=[opt["value"] for opt in options],
+                    default=default_val,
                 )
+                network_mode_choice = choice
+                network_mode_env_var = question.get("env_var")
+                network_mode_default_port = question.get("default_port")
+                responses[f"q{i}"] = {"type": "network_mode", "value": network_mode_choice}
+                console.print(f"[green]Selected: {network_mode_choice}[/green]\n")
+            elif q_type == "env_configs":
+                # Apply network mode choice to env_configs before displaying
+                configs = question["configs"]
+                if network_mode_choice and network_mode_env_var:
+                    for cfg in configs:
+                        if cfg.get("name") == network_mode_env_var:
+                            if network_mode_choice == "bridge":
+                                # Bridge: container uses fixed port, Nomad handles mapping
+                                cfg["value"] = str(network_mode_default_port)
+                                cfg["source"] = "fixed"
+                                cfg["confidence"] = 1.0
+                            else:  # host mode
+                                # Host: app must use Nomad's allocated port to avoid conflicts
+                                cfg["value"] = "${NOMAD_PORT_http}"
+                                cfg["source"] = "nomad"
+                                cfg["confidence"] = 1.0
+                            break
+
+                # Route to interactive env config handler
+                env_configs = _collect_env_config_responses(configs, app_name)
                 responses[f"q{i}"] = {"type": "env_configs", "configs": env_configs}
             elif q_type == "vault_paths":
                 # Route to legacy Vault path handler for backward compatibility
@@ -382,6 +443,61 @@ def _collect_user_responses(state: dict) -> dict[str, Any]:
             # Original behavior for plain string questions
             response = Prompt.ask(f"[cyan]{i}.[/cyan] {question}")
             responses[f"q{i}"] = response
+
+    return responses
+
+
+def _auto_respond_to_questions(questions: list) -> dict[str, Any]:
+    """Auto-respond to questions with defaults for --no-questions mode.
+
+    Args:
+        questions: List of questions (strings or dicts).
+
+    Returns:
+        Dict of default responses.
+    """
+    responses = {}
+
+    # Track network mode to apply to env_configs
+    network_mode_choice = "bridge"  # Default
+    network_mode_env_var = None
+    network_mode_default_port = None
+
+    for i, question in enumerate(questions, 1):
+        if isinstance(question, dict):
+            q_type = question.get("type")
+            if q_type == "network_mode":
+                # Default to bridge networking
+                network_mode_choice = question.get("default", "bridge")
+                network_mode_env_var = question.get("env_var")
+                network_mode_default_port = question.get("default_port")
+                responses[f"q{i}"] = {"type": "network_mode", "value": network_mode_choice}
+            elif q_type == "env_configs":
+                # Apply network mode choice to env_configs
+                configs = [dict(c) for c in question["configs"]]  # Copy
+                if network_mode_env_var:
+                    for cfg in configs:
+                        if cfg.get("name") == network_mode_env_var:
+                            if network_mode_choice == "bridge":
+                                # Bridge: fixed port, Nomad handles mapping
+                                cfg["value"] = str(network_mode_default_port)
+                                cfg["source"] = "fixed"
+                            else:
+                                # Host: dynamic port to avoid conflicts
+                                cfg["value"] = "${NOMAD_PORT_http}"
+                                cfg["source"] = "nomad"
+                            break
+                responses[f"q{i}"] = {"type": "env_configs", "configs": configs}
+            elif q_type == "vault_paths":
+                # Accept suggested paths
+                responses[f"q{i}"] = {
+                    s["env_var"]: s.get("vault_reference", f"{s['suggested_path']}#{s['key']}")
+                    for s in question.get("suggestions", [])
+                }
+            else:
+                responses[f"q{i}"] = "default"
+        else:
+            responses[f"q{i}"] = "default"
 
     return responses
 

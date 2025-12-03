@@ -246,23 +246,21 @@ def create_enrich_node(
             else:
                 span.end(output={"total": 0, "reason": "no_env_vars"})
 
-        # Apply port env var mappings from port_analysis
-        # Port env vars should use Nomad's dynamic port, not Vault/Consul
+        # Apply port env var mapping from port_analysis (single app listening port)
+        # Only the app's listening port env var should use Nomad's dynamic port
         port_analysis = state.get("port_analysis", {})
-        port_env_mappings = port_analysis.get("recommended_env_mappings", {})
-        if port_env_mappings:
-            with obs.span("apply_port_env_mappings", trace=trace, input={"mappings": list(port_env_mappings.keys())}) as span:
-                updated_count = 0
-                for env_var, nomad_ref in port_env_mappings.items():
+        port_env_mapping = port_analysis.get("recommended_env_mapping", {})
+        if port_env_mapping:
+            with obs.span("apply_port_env_mapping", trace=trace, input={"mapping": list(port_env_mapping.keys())}) as span:
+                for env_var, nomad_ref in port_env_mapping.items():
                     # Find existing config for this env var and update it
                     found = False
                     for cfg in env_var_configs:
                         if cfg.get("name") == env_var:
                             cfg["source"] = "nomad"
                             cfg["value"] = nomad_ref
-                            cfg["confidence"] = 0.95  # High confidence for port mappings
+                            cfg["confidence"] = 0.95  # High confidence - LLM identified this
                             found = True
-                            updated_count += 1
                             break
                     # If not found, add new config
                     if not found:
@@ -272,9 +270,8 @@ def create_enrich_node(
                             "value": nomad_ref,
                             "confidence": 0.95,
                         })
-                        updated_count += 1
-                logger.info(f"Applied {updated_count} port env mappings from port_analysis")
-                span.end(output={"updated_count": updated_count})
+                logger.info(f"Applied port env mapping: {env_var} -> {nomad_ref}")
+                span.end(output={"env_var": env_var, "mapping": nomad_ref})
 
         # Also maintain legacy vault_suggestions for backward compatibility
         with obs.span("suggest_vault_mappings", trace=trace, input={"env_vars_count": len(env_vars)}) as span:

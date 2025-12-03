@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This project is a LangGraph-based AI agent system designed to automate Nomad job specification creation and deployment. The agent accepts high-level prompts, analyzes codebases, generates clarifying questions, creates Nomad job specs (HCL/JSON), deploys them, verifies status, and iterates on fixes with long-term memory capabilities.
 
+You can assume you have an LLM at your disposal
+
 ## Technology Stack
 
 - **Agent Framework**: LangGraph for stateful workflow orchestration with iterative cycles
@@ -117,7 +119,11 @@ Each node should:
 
 ## Prompt Management
 
+Langfuse holds the truth, always make sure you download the latest prompt from Langfuse when making changes
+
 See [docs/prompts.md](docs/prompts.md) for detailed documentation.
+
+ALWAYS EDIT PROMPTS IN JOBFORGE
 
 **Quick Reference:**
 
@@ -205,6 +211,34 @@ If `verify_deployment` fails:
 3. Inject error context + memories into fix prompt
 4. Route back to `generate_spec` node
 5. Limit iterations to prevent infinite loops (max 3 attempts)
+
+### LangGraph Human-in-the-Loop Pattern
+
+**IMPORTANT**: Use the proper `interrupt()` pattern, not `interrupt_before`.
+
+The correct way to implement HitL in LangGraph (see https://langchain-ai.github.io/langgraph/how-tos/human_in_the_loop/wait-user-input/):
+
+```python
+from langgraph.types import interrupt, Command
+
+# CORRECT: Call interrupt() INSIDE the node
+def collect_responses_node(state):
+    questions = state.get("questions", [])
+    user_responses = interrupt(questions)  # Pauses here, returns user input when resumed
+    return {**state, "user_responses": user_responses}
+
+# Resume with Command(resume=value)
+for event in graph.stream(Command(resume=responses), config):
+    pass
+```
+
+**DO NOT** use the older pattern of `interrupt_before=["node_name"]` with a pass-through node and manual state updates via `graph.update_state()`. This pattern is harder to reason about and can lead to state synchronization issues.
+
+Key points:
+- `interrupt(value)` pauses the graph and passes `value` to the caller
+- Resume with `Command(resume=response)` - the response becomes the return value of `interrupt()`
+- Get interrupt value from state: `state.tasks[0].interrupts[0].value`
+- The node handles both the pause and the response in one place
 
 ## Containerization
 

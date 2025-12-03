@@ -16,6 +16,7 @@ from src.tools.hcl import (
     VaultConfig,
     FabioRoute,
     ServiceType,
+    NetworkMode,
     generate_hcl,
     validate_hcl,
     sanitize_job_name,
@@ -200,6 +201,9 @@ def generate_spec_node(
     # Extract confirmed env configs from user responses if available
     confirmed_env_configs = _extract_confirmed_env_configs(user_responses, env_var_configs)
 
+    # Extract network mode from user responses (defaults to bridge)
+    network_mode = _extract_network_mode(user_responses)
+
     # Build context for LLM with enrichment data
     with obs.span("build_generation_context", trace=trace) as span:
         context = _build_generation_context(
@@ -233,13 +237,14 @@ def generate_spec_node(
     with obs.span("parse_llm_response", trace=trace) as span:
         try:
             config_dict = _parse_llm_response(response_text)
-            # Pass nomad_info and env_var_configs for proper configuration
+            # Pass nomad_info, env_var_configs, and network_mode for proper configuration
             config = _build_job_config(
                 config_dict,
                 analysis,
                 settings,
                 nomad_info,
                 env_var_configs=confirmed_env_configs,
+                network_mode=network_mode,
             )
             span.end(output={"job_name": config.job_name, "service_type": str(config.service_type)})
         except Exception as e:
@@ -414,6 +419,33 @@ def _extract_confirmed_env_configs(
     return default_configs
 
 
+def _extract_network_mode(user_responses: dict[str, Any]) -> NetworkMode:
+    """Extract network mode choice from user responses.
+
+    Looks for a network_mode response and returns the appropriate NetworkMode.
+    Defaults to BRIDGE if not specified.
+
+    Args:
+        user_responses: Dict of user responses to questions.
+
+    Returns:
+        NetworkMode enum value.
+    """
+    for key, value in user_responses.items():
+        if isinstance(value, dict) and value.get("type") == "network_mode":
+            choice = value.get("value", "bridge")
+            if choice == "host":
+                return NetworkMode.HOST
+            return NetworkMode.BRIDGE
+        # Also check for simple string response
+        if key == "network_mode" or (isinstance(value, str) and value in ("host", "bridge")):
+            if value == "host":
+                return NetworkMode.HOST
+            return NetworkMode.BRIDGE
+
+    return NetworkMode.BRIDGE  # Default
+
+
 def _parse_llm_response(response_text: str) -> dict[str, Any]:
     """Parse LLM response to extract job configuration."""
     # Try to extract JSON from response
@@ -436,6 +468,7 @@ def _build_job_config(
     settings,
     nomad_info: dict[str, Any] | None = None,
     env_var_configs: list[dict] | None = None,
+    network_mode: NetworkMode = NetworkMode.BRIDGE,
 ) -> JobConfig:
     """Build JobConfig from LLM response and analysis.
 
@@ -445,6 +478,7 @@ def _build_job_config(
         settings: App settings.
         nomad_info: Nomad version info.
         env_var_configs: Confirmed multi-source env var configurations.
+        network_mode: Network mode (bridge or host) from user response.
     """
     # Get job name
     job_name = config_dict.get("job_name", "unnamed-job")
@@ -585,6 +619,7 @@ def _build_job_config(
         fabio_route=fabio_route,
         volumes=volumes,
         vault=vault,
+        network_mode=network_mode,
     )
 
 

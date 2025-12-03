@@ -361,10 +361,11 @@ def compile_graph(
 
     if enable_checkpointing:
         checkpointer = MemorySaver()
-        # Interrupt before confirm (Dockerfile) and collect (questions) for HitL
+        # Interrupt before confirm (Dockerfile) for HitL
+        # The collect node uses interrupt() internally for questions
         return workflow.compile(
             checkpointer=checkpointer,
-            interrupt_before=["confirm", "collect"],
+            interrupt_before=["confirm"],
         )
     else:
         return workflow.compile()
