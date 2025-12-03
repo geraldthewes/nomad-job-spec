@@ -10,6 +10,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 
 from src.nodes.analyze import create_analyze_node
+from src.nodes.analyze_build_system import create_analyze_build_system_node
 from src.nodes.discover import (
     create_select_node,
     should_select_dockerfile,
@@ -81,6 +82,7 @@ class AgentState(dict):
 
     # Source discovery and extraction (from discover_sources, extract, merge nodes)
     discovered_sources: dict[str, str]  # source_type -> file_path
+    build_system_analysis: dict[str, Any]  # Analysis of how images are built
     extractions: list[dict[str, Any]]  # List of extraction results
     merged_extraction: dict[str, Any]  # Combined extraction with priority
     extraction_sources: dict[str, dict[str, Any]]  # Field -> source attribution
@@ -137,6 +139,7 @@ def create_initial_state(
         "pre_deploy_validation": {},
         # Source discovery and extraction
         "discovered_sources": {},
+        "build_system_analysis": {},
         "extractions": [],
         "merged_extraction": {},
         "extraction_sources": {},
@@ -199,9 +202,10 @@ def create_workflow(
     """Create the LangGraph workflow for job spec generation.
 
     Workflow with source discovery and extraction:
-    START -> discover_sources -> [select] -> extract -> merge -> analyze -> enrich -> question -> collect -> generate -> validate -> deploy -> verify
+    START -> discover_sources -> [select] -> analyze_build_system -> extract -> merge -> analyze -> enrich -> question -> collect -> generate -> validate -> deploy -> verify
 
     The select node is skipped if only one Dockerfile exists (via conditional edge).
+    The analyze_build_system node uses LLM to understand how images are built.
     The extract/merge nodes run extractors on discovered sources (build.yaml, Makefile, etc.).
 
     Args:
@@ -218,6 +222,7 @@ def create_workflow(
     # Create node functions
     discover_sources_node = create_discover_sources_node()
     select_node = create_select_node()
+    analyze_build_system_node = create_analyze_build_system_node(llm)
     extract_node = create_extract_node()
     merge_node = create_merge_node()
     analyze_node = create_analyze_node(llm)
@@ -234,6 +239,7 @@ def create_workflow(
     # Add nodes
     workflow.add_node("discover_sources", discover_sources_node)
     workflow.add_node("select", select_node)
+    workflow.add_node("analyze_build_system", analyze_build_system_node)
     workflow.add_node("extract", extract_node)
     workflow.add_node("merge", merge_node)
     workflow.add_node("analyze", analyze_node)
@@ -243,7 +249,7 @@ def create_workflow(
     workflow.add_node("generate", generate_node)
     workflow.add_node("validate", validate_node)
 
-    # Flow: discover_sources -> [select] -> extract -> merge -> analyze -> enrich -> question -> collect -> generate -> validate
+    # Flow: discover_sources -> [select] -> analyze_build_system -> extract -> merge -> analyze -> enrich -> question -> collect -> generate -> validate
     workflow.add_edge(START, "discover_sources")
 
     # Conditional: skip selection if only 1 Dockerfile or none
@@ -252,10 +258,11 @@ def create_workflow(
         should_select_dockerfile,
         {
             "select": "select",
-            "skip": "extract",
+            "skip": "analyze_build_system",
         },
     )
-    workflow.add_edge("select", "extract")
+    workflow.add_edge("select", "analyze_build_system")
+    workflow.add_edge("analyze_build_system", "extract")
 
     workflow.add_edge("extract", "merge")
     workflow.add_edge("merge", "analyze")

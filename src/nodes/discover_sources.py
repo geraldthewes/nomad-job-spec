@@ -32,6 +32,10 @@ SOURCE_FILE_PATTERNS = {
     ],
 }
 
+# Common subdirectories where build files may be located
+# These are checked after the root directory
+BUILD_SUBDIRS = ["deploy", "ci", ".build", "build", ".ci", "infra", "infrastructure"]
+
 
 def discover_sources_node(state: dict[str, Any]) -> dict[str, Any]:
     """Discover all source files that can provide deployment configuration.
@@ -91,19 +95,40 @@ def discover_sources_node(state: dict[str, Any]) -> dict[str, Any]:
     with obs.span("scan_sources", trace=trace) as span:
         # Scan for each category of source file
         for source_type, patterns in SOURCE_FILE_PATTERNS.items():
+            found = False
+            # Check in root directory first
             for pattern in patterns:
-                # Check in root directory first
                 file_path = codebase / pattern
                 if file_path.exists() and file_path.is_file():
                     discovered[source_type] = str(file_path)
                     logger.info(f"Discovered {source_type}: {file_path}")
+                    found = True
                     break  # Use first match for this category
+
+            # If not found in root and this is a type that may be in subdirs,
+            # check common subdirectories (jobforge, docker_compose - not makefile)
+            if not found and source_type in ("jobforge", "docker_compose"):
+                for subdir in BUILD_SUBDIRS:
+                    subdir_path = codebase / subdir
+                    if not subdir_path.exists() or not subdir_path.is_dir():
+                        continue
+                    for pattern in patterns:
+                        file_path = subdir_path / pattern
+                        if file_path.exists() and file_path.is_file():
+                            discovered[source_type] = str(file_path)
+                            logger.info(f"Discovered {source_type}: {file_path} (in {subdir}/)")
+                            found = True
+                            break
+                    if found:
+                        break
 
         # Also discover additional files using extractor patterns
         for extractor in get_all_extractors():
             if extractor.name in discovered:
                 continue  # Already found this type
 
+            found = False
+            # Check root first
             for pattern in extractor.file_patterns:
                 file_path = codebase / pattern
                 if file_path.exists() and file_path.is_file():
@@ -117,9 +142,35 @@ def discover_sources_node(state: dict[str, Any]) -> dict[str, Any]:
                                 f"Discovered {extractor.name}: {file_path} "
                                 f"(via extractor pattern)"
                             )
+                            found = True
                             break
                     except Exception as e:
                         logger.warning(f"Could not read {file_path}: {e}")
+
+            # Check subdirectories if not found in root
+            if not found:
+                for subdir in BUILD_SUBDIRS:
+                    subdir_path = codebase / subdir
+                    if not subdir_path.exists() or not subdir_path.is_dir():
+                        continue
+                    for pattern in extractor.file_patterns:
+                        file_path = subdir_path / pattern
+                        if file_path.exists() and file_path.is_file():
+                            try:
+                                with open(file_path) as f:
+                                    content = f.read()
+                                if extractor.can_extract(str(file_path), content):
+                                    discovered[extractor.name] = str(file_path)
+                                    logger.info(
+                                        f"Discovered {extractor.name}: {file_path} "
+                                        f"(via extractor in {subdir}/)"
+                                    )
+                                    found = True
+                                    break
+                            except Exception as e:
+                                logger.warning(f"Could not read {file_path}: {e}")
+                    if found:
+                        break
 
         span.end(output={"discovered_count": len(discovered), "sources": list(discovered.keys())})
 

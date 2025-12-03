@@ -13,6 +13,7 @@ import yaml
 from src.tools.extractors.base import (
     BaseExtractor,
     ExtractionResult,
+    PortConfig,
     ResourceConfig,
     VaultSecret,
 )
@@ -86,20 +87,33 @@ class JobforgeExtractor(BaseExtractor):
             else:
                 docker_image = f"{image_name}:{image_tag}"
 
-        # Extract resource_limits from root level (applies to all phases)
+        # Extract from test section (per JobForge spec)
+        # Test section contains runtime configuration for Nomad
+        test_section = data.get("test", {})
+
+        # Extract resource_limits - prefer test over build for runtime
         resources = None
         resource_limits = data.get("resource_limits", {})
-        # Check both root level and build-specific limits
-        build_limits = resource_limits.get("build", resource_limits)
-        if build_limits:
+        # Use test limits for Nomad (runtime), fall back to build if not present
+        test_limits = resource_limits.get("test", {})
+        build_limits = resource_limits.get("build", {})
+        runtime_limits = test_limits if test_limits else build_limits
+        if runtime_limits:
             resources = ResourceConfig(
-                cpu=_parse_int(build_limits.get("cpu")),
-                memory=_parse_int(build_limits.get("memory")),
-                disk=_parse_int(build_limits.get("disk")),
+                cpu=_parse_int(runtime_limits.get("cpu")),
+                memory=_parse_int(runtime_limits.get("memory")),
+                disk=_parse_int(runtime_limits.get("disk")),
             )
 
-        # Extract from test section (per JobForge spec)
-        test_section = data.get("test", {})
+        # Extract container_port as port configuration
+        ports = None
+        container_port = test_section.get("container_port")
+        if container_port:
+            ports = [PortConfig(
+                name="http",
+                container_port=int(container_port),
+                static=False,
+            )]
 
         # Environment variables
         env_vars = test_section.get("env", {})
@@ -131,6 +145,7 @@ class JobforgeExtractor(BaseExtractor):
             registry_url=registry_url,
             image_name=image_name,
             image_tag=image_tag,
+            ports=ports,
             env_vars=env_vars if env_vars else None,
             vault_secrets=vault_secrets if vault_secrets else None,
             vault_policies=vault_policies if vault_policies else None,

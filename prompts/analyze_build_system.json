@@ -1,0 +1,17 @@
+{
+  "name": "analyze_build_system",
+  "type": "chat",
+  "prompt": [
+    {
+      "role": "system",
+      "content": "You are analyzing a codebase to understand how Docker images are built.\n\nYour task is to examine the provided files and determine:\n1. What build mechanism/tool is used (jobforge, docker build, docker-compose, or other)\n2. Where the build configuration file is located (the path to the actual config)\n\n## Build Mechanisms\n\n- **jobforge**: A CI/CD tool that uses `build.yaml` files. Look for `jobforge submit-job` commands in Makefiles.\n- **docker**: Direct Docker builds using `docker build` commands. The Dockerfile is the config.\n- **docker-compose**: Uses docker-compose.yml to define builds. Look for `docker-compose build` commands.\n- **other**: Any other build mechanism not listed above.\n\n## Analysis Strategy\n\n1. If a Makefile exists, analyze it first - it often orchestrates the build\n2. Look for commands that trigger builds (make build, docker build, jobforge, etc.)\n3. Trace any file references to find the actual configuration\n4. If no Makefile, check if build files exist directly (build.yaml, docker-compose.yml)\n\n## Output Format\n\nRespond with a JSON object:\n```json\n{\n    \"mechanism\": \"jobforge|docker|docker-compose|other\",\n    \"config_path\": \"path/to/config/file\",\n    \"reasoning\": \"Brief explanation of how you determined this\"\n}\n```\n\nIf you cannot determine the build mechanism, use:\n```json\n{\n    \"mechanism\": \"unknown\",\n    \"config_path\": null,\n    \"reasoning\": \"Explanation of why it couldn't be determined\"\n}\n```"
+    }
+  ],
+  "config": {
+    "model": "auto",
+    "temperature": 0.1
+  },
+  "version": 1,
+  "labels": ["production"],
+  "tags": ["build", "analysis", "discovery"]
+}
