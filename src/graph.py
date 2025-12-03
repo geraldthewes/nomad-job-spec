@@ -11,10 +11,12 @@ from langchain_core.messages import BaseMessage
 
 from src.nodes.analyze import create_analyze_node
 from src.nodes.discover import (
-    create_discover_node,
     create_select_node,
     should_select_dockerfile,
 )
+from src.nodes.discover_sources import create_discover_sources_node
+from src.nodes.extract import create_extract_node
+from src.nodes.merge import create_merge_node
 from src.nodes.generate import create_generate_node, create_fix_node
 from src.nodes.enrich import create_enrich_node
 from src.nodes.validate import create_validate_node, should_proceed_after_validation
@@ -77,6 +79,12 @@ class AgentState(dict):
     # Pre-deployment validation
     pre_deploy_validation: dict[str, Any]
 
+    # Source discovery and extraction (from discover_sources, extract, merge nodes)
+    discovered_sources: dict[str, str]  # source_type -> file_path
+    extractions: list[dict[str, Any]]  # List of extraction results
+    merged_extraction: dict[str, Any]  # Combined extraction with priority
+    extraction_sources: dict[str, dict[str, Any]]  # Field -> source attribution
+
 
 def create_initial_state(
     codebase_path: str,
@@ -127,6 +135,11 @@ def create_initial_state(
         "nomad_info": {},
         # Validation
         "pre_deploy_validation": {},
+        # Source discovery and extraction
+        "discovered_sources": {},
+        "extractions": [],
+        "merged_extraction": {},
+        "extraction_sources": {},
     }
 
 
@@ -185,10 +198,11 @@ def create_workflow(
 ) -> StateGraph:
     """Create the LangGraph workflow for job spec generation.
 
-    Workflow with Dockerfile selection before analysis:
-    START -> discover -> [select] -> analyze -> enrich -> question -> collect -> generate -> validate -> deploy -> verify
+    Workflow with source discovery and extraction:
+    START -> discover_sources -> [select] -> extract -> merge -> analyze -> enrich -> question -> collect -> generate -> validate -> deploy -> verify
 
     The select node is skipped if only one Dockerfile exists (via conditional edge).
+    The extract/merge nodes run extractors on discovered sources (build.yaml, Makefile, etc.).
 
     Args:
         llm: LLM instance for analysis and generation.
@@ -202,8 +216,10 @@ def create_workflow(
         settings = get_settings()
 
     # Create node functions
-    discover_node = create_discover_node()
+    discover_sources_node = create_discover_sources_node()
     select_node = create_select_node()
+    extract_node = create_extract_node()
+    merge_node = create_merge_node()
     analyze_node = create_analyze_node(llm)
     enrich_node = create_enrich_node(settings)
     question_node = create_question_node()
@@ -216,8 +232,10 @@ def create_workflow(
     workflow = StateGraph(dict)
 
     # Add nodes
-    workflow.add_node("discover", discover_node)
+    workflow.add_node("discover_sources", discover_sources_node)
     workflow.add_node("select", select_node)
+    workflow.add_node("extract", extract_node)
+    workflow.add_node("merge", merge_node)
     workflow.add_node("analyze", analyze_node)
     workflow.add_node("enrich", enrich_node)
     workflow.add_node("question", question_node)
@@ -225,20 +243,22 @@ def create_workflow(
     workflow.add_node("generate", generate_node)
     workflow.add_node("validate", validate_node)
 
-    # Flow: discover -> [select] -> analyze -> enrich -> question -> collect -> generate -> validate
-    workflow.add_edge(START, "discover")
+    # Flow: discover_sources -> [select] -> extract -> merge -> analyze -> enrich -> question -> collect -> generate -> validate
+    workflow.add_edge(START, "discover_sources")
 
     # Conditional: skip selection if only 1 Dockerfile or none
     workflow.add_conditional_edges(
-        "discover",
+        "discover_sources",
         should_select_dockerfile,
         {
             "select": "select",
-            "skip": "analyze",
+            "skip": "extract",
         },
     )
-    workflow.add_edge("select", "analyze")
+    workflow.add_edge("select", "extract")
 
+    workflow.add_edge("extract", "merge")
+    workflow.add_edge("merge", "analyze")
     workflow.add_edge("analyze", "enrich")
     workflow.add_edge("enrich", "question")
     workflow.add_edge("question", "collect")

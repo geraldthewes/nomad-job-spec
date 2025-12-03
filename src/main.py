@@ -503,13 +503,35 @@ def _display_configuration_summary(state: dict):
     Shows all tracked values including job metadata, Docker config, resources,
     network settings, service configuration, and Vault integration.
 
+    Values are pulled from merged_extraction first (from extractors like jobforge),
+    then fall back to codebase_analysis for LLM-derived values.
+
     Args:
-        state: Current graph state with codebase_analysis and enrichment data.
+        state: Current graph state with merged_extraction, codebase_analysis, and enrichment data.
     """
+    # Primary source: merged extraction from build tools (jobforge, makefile, etc.)
+    merged = state.get("merged_extraction", {})
+    sources = state.get("extraction_sources", {})
+
+    # Fallback: LLM analysis
     analysis = state.get("codebase_analysis", {})
+
+    # Enrichment data
     fabio = state.get("fabio_validation", {})
     vault_suggestions = state.get("vault_suggestions", {})
     env_var_configs = state.get("env_var_configs", [])
+
+    def get_source(field: str, fallback: str = "analysis") -> str:
+        """Get source attribution for a field."""
+        if field in sources:
+            return sources[field].get("source_type", fallback)
+        return fallback
+
+    def get_value(field: str, default=None):
+        """Get value from merged extraction or analysis."""
+        if field in merged:
+            return merged[field]
+        return analysis.get(field, default)
 
     # Main configuration table
     table = Table(title="Configuration Summary")
@@ -518,30 +540,41 @@ def _display_configuration_summary(state: dict):
     table.add_column("Source", style="dim", justify="right")
 
     # Job metadata
-    job_name = state.get("job_name") or analysis.get("project_name") or "unknown"
-    table.add_row("Job Name", job_name, "derived")
+    job_name = get_value("job_name") or state.get("job_name") or analysis.get("project_name") or "unknown"
+    job_source = get_source("job_name", "derived")
+    table.add_row("Job Name", job_name, job_source)
 
     # Docker image
-    docker_image = analysis.get("docker_image", "")
+    docker_image = get_value("docker_image", "")
     if docker_image:
         # Truncate long image names for display
         display_image = docker_image if len(docker_image) <= 50 else docker_image[:47] + "..."
-        table.add_row("Docker Image", display_image, "analysis")
+        table.add_row("Docker Image", display_image, get_source("docker_image", "analysis"))
     else:
         table.add_row("Docker Image", "[dim]not specified[/dim]", "-")
 
     # Service type and resources
-    service_type = analysis.get("service_type", "MEDIUM")
-    resources = analysis.get("resources", {})
-    cpu = resources.get("cpu", "-")
-    memory = resources.get("memory", "-")
+    service_type = get_value("service_type", "MEDIUM")
 
-    table.add_row("Service Type", service_type, "analysis")
-    table.add_row("CPU", f"{cpu} MHz" if cpu != "-" else "-", service_type)
-    table.add_row("Memory", f"{memory} MB" if memory != "-" else "-", service_type)
+    # Resources from extraction or analysis
+    extracted_resources = merged.get("resources", {})
+    analysis_resources = analysis.get("resources", {})
+    resources = extracted_resources if extracted_resources else analysis_resources
+
+    if isinstance(resources, dict):
+        cpu = resources.get("cpu", "-")
+        memory = resources.get("memory", "-")
+    else:
+        cpu = "-"
+        memory = "-"
+
+    resource_source = get_source("resources", service_type)
+    table.add_row("Service Type", service_type, get_source("service_type", "analysis"))
+    table.add_row("CPU", f"{cpu} MHz" if cpu != "-" else "-", resource_source)
+    table.add_row("Memory", f"{memory} MB" if memory != "-" else "-", resource_source)
 
     # Ports
-    ports = analysis.get("ports", [])
+    ports = get_value("ports", [])
     if ports:
         port_strs = []
         for p in ports:
@@ -549,16 +582,16 @@ def _display_configuration_summary(state: dict):
                 port_strs.append(f"{p.get('name', 'http')}:{p.get('container_port', '?')}")
             else:
                 port_strs.append(str(p))
-        table.add_row("Ports", ", ".join(port_strs), "analysis")
+        table.add_row("Ports", ", ".join(port_strs), get_source("ports", "analysis"))
     else:
         table.add_row("Ports", "[dim]none detected[/dim]", "-")
 
     # Health check
-    health_check = analysis.get("health_check", {})
+    health_check = get_value("health_check", {})
     if health_check:
         hc_type = health_check.get("type", "http")
         hc_path = health_check.get("path", "/health")
-        table.add_row("Health Check", f"{hc_type.upper()} {hc_path}", "analysis")
+        table.add_row("Health Check", f"{hc_type.upper()} {hc_path}", get_source("health_check", "analysis"))
     else:
         table.add_row("Health Check", "[dim]none[/dim]", "-")
 
@@ -582,16 +615,34 @@ def _display_configuration_summary(state: dict):
     else:
         table.add_row("Fabio Route", "[dim]none[/dim]", "-")
 
-    # Vault integration
+    # Vault integration - check extraction first
+    vault_secrets = get_value("vault_secrets", [])
+    vault_policies = get_value("vault_policies", [])
     secrets = analysis.get("secrets", [])
-    if secrets:
+
+    if vault_secrets:
+        table.add_row(
+            "Vault Secrets",
+            f"{len(vault_secrets)} configured",
+            get_source("vault_secrets", "extraction")
+        )
+    elif secrets:
         table.add_row("Vault Secrets", f"{len(secrets)} variables", "analysis")
     elif vault_suggestions:
         table.add_row("Vault Secrets", f"{len(vault_suggestions)} suggested", "enrichment")
     else:
         table.add_row("Vault Secrets", "[dim]none[/dim]", "-")
 
-    # Environment variables summary
+    # Vault policies (if extracted)
+    if vault_policies:
+        table.add_row(
+            "Vault Policies",
+            ", ".join(vault_policies),
+            get_source("vault_policies", "extraction")
+        )
+
+    # Environment variables summary - combine extraction and enrichment
+    env_vars = get_value("env_vars", {})
     if env_var_configs:
         fixed_count = sum(1 for c in env_var_configs if c.get("source") == "fixed")
         consul_count = sum(1 for c in env_var_configs if c.get("source") == "consul")
@@ -604,23 +655,31 @@ def _display_configuration_summary(state: dict):
         if vault_count:
             parts.append(f"{vault_count} vault")
         table.add_row("Env Variables", ", ".join(parts) if parts else "0", "enrichment")
+    elif env_vars:
+        source = get_source("env_vars", "analysis")
+        table.add_row("Env Variables", f"{len(env_vars)} detected", source)
     else:
-        env_vars = analysis.get("env_vars", {})
-        if env_vars:
-            table.add_row("Env Variables", f"{len(env_vars)} detected", "analysis")
+        analysis_env = analysis.get("env_vars", {})
+        if analysis_env:
+            table.add_row("Env Variables", f"{len(analysis_env)} detected", "analysis")
         else:
             table.add_row("Env Variables", "[dim]none[/dim]", "-")
 
+    # GPU requirement (from extraction)
+    requires_gpu = get_value("requires_gpu", False)
+    if requires_gpu:
+        table.add_row("GPU Required", "Yes", get_source("requires_gpu", "extraction"))
+
     # Architecture requirements
-    requires_amd64 = analysis.get("requires_amd64", False)
+    requires_amd64 = get_value("requires_amd64", False)
     if requires_amd64:
-        table.add_row("Architecture", "AMD64 required", "analysis")
+        table.add_row("Architecture", "AMD64 required", get_source("requires_amd64", "analysis"))
 
     # Storage requirements
-    requires_storage = analysis.get("requires_storage", False)
+    requires_storage = get_value("requires_storage", False)
     if requires_storage:
-        storage_path = analysis.get("storage_path", "/data")
-        table.add_row("Storage", f"CSI volume at {storage_path}", "analysis")
+        storage_path = get_value("storage_path", "/data")
+        table.add_row("Storage", f"CSI volume at {storage_path}", get_source("requires_storage", "analysis"))
 
     console.print()
     console.print(table)
