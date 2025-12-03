@@ -81,7 +81,7 @@ Homepage = "https://github.com/gerald/nomad-job-spec"
 Issues = "https://github.com/gerald/nomad-job-spec/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src"]
+packages = ["src", "config"]
 
 [tool.ruff]
 target-version = "py310"
