@@ -3902,3 +3902,586 @@ Implementation complete. Here's a summary of what was changed:
   You can test with:
   nomad-spec generate --path /path/to/codebase
 
+Plan: Improve Langfuse Tracing with Session ID and Tags
+
+ Summary
+
+ Two changes to improve Langfuse trace visibility:
+ 1. Log a trace entry when the graph starts with the repo location
+ 2. Configure Langfuse session with UUID-based session_id and tags
+
+ Files to Modify
+
+ 1. src/main.py
+
+ Change A: Generate UUID-based session ID (line 91)
+ # Before:
+ import time
+ session_id = f"session-{cluster_id}-{int(time.time())}"
+
+ # After:
+ import uuid
+ session_id = str(uuid.uuid4())
+
+ Change B: Add Langfuse metadata to config (line 160)
+ # Before:
+ config = {"configurable": {"thread_id": f"session-{cluster_id}"}}
+
+ # After:
+ config = {
+     "configurable": {"thread_id": f"session-{cluster_id}"},
+     "metadata": {
+         "langfuse_session_id": session_id,
+         "langfuse_tags": ["nomad-job-spec"],
+     },
+ }
+
+ Change C: Log initial trace at graph start (after line 161, before first graph.stream)
+ # Create initial trace logging the codebase location
+ if obs.is_enabled():
+     trace = obs.create_trace(
+         name="graph_start",
+         input={"codebase_path": str(codebase_path.absolute()) if not is_git_url else path},
+     )
+     trace.end()
+
+ Implementation Notes
+
+ - The langfuse_session_id and langfuse_tags are passed via config metadata per https://langf
+ - This metadata is automatically picked up by the Langfuse callback handler when graph.stream() is called
+ - The initial trace uses the existing obs.create_trace() method which is already implemented in src/observability/__init__.py
+ - The uuid.uuid4() generates a random UUID per session, making traces easier to group and identify
+
+ Testing
+
+ After implementation, run a generation and verify in Langfuse:
+ 1. A "graph_start" trace appears with the codebase path
+ 2. All traces are grouped under the same session ID (UUID)
+ 3. Traces have the "nomad-job-spec" tag
+
+ All changes implemented in src/main.py:
+
+  1. UUID session ID: Replaced f"session-{cluster_id}-{int(time.time())}" with uuid.uuid4()
+  2. CLI output: Session ID is now displayed when Langfuse is enabled:
+  LangFuse tracing enabled | Session: <uuid>
+  3. Langfuse metadata: Config now includes langfuse_session_id and langfuse_tags: ["nomad-job-spec"]
+  4. Initial trace: A "graph_start" trace is logged with the codebase path before the graph runs
+
+  You can test by running a generation and checking Langfuse for:
+  - Traces grouped by the UUID session ID
+  - The "nomad-job-spec" tag on traces
+  - A "graph_start" trace showing the codebase path
+
+
+he plan is ready. It will add a comprehensive "Job Configuration" table that displays all tracked values (job name, docker image, resources, network mode,
+  health check, Fabio route, vault policy, etc.) before the existing environment variable table, giving you visibility into everything the tool is tracking.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Ready to code?
+
+ Here is Claude's plan:
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Plan: Display All Tracked Configuration Values
+
+ Problem
+
+ The nomad-spec generate command currently only displays the "Environment Variable Configuration" table. Other important tracked values (Docker image, resources,
+ network config, service tags, etc.) are not shown to the user, making it hard to verify what the tool is doing.
+
+ Reference
+
+ The example HCL in tmp/video-transcription.hcl shows the full range of values that should be displayed:
+ - Docker image: registry.cluster:5000/video-transcription-ws:latest
+ - Resources: cpu=4000, memory=8192
+ - Network: host mode, dynamic http port
+ - Service: health check path, tags, Fabio routing
+ - Vault: policies, template secrets
+ - Constraints: GPU capable nodes
+
+ Solution
+
+ Add a comprehensive "Configuration Summary" display that shows all tracked values before user confirmation, not just environment variables.
+
+ Files to Modify
+
+ 1. src/main.py
+
+ - Add new function _display_configuration_summary(state: dict) that creates multiple Rich tables:
+   - Job Configuration: job_name, datacenters, namespace
+   - Docker Configuration: image, network_mode, ports
+   - Resources: cpu, memory, service_type
+   - Service Configuration: service_name, health_check, tags
+   - Secrets & Vault: vault policies, secret paths
+   - Environment Variables: (existing table, reused)
+ - Call this function after the enrich node runs and before asking for user confirmation
+
+ 2. src/nodes/enrich.py (read-only impact)
+
+ - No changes needed - already returns all the necessary data in state:
+   - env_var_configs, fabio_validation, nomad_info, vault_suggestions
+
+ 3. Data sources for display
+
+ From state after enrich node:
+ - codebase_analysis → docker_image, ports, resources, service_type
+ - env_var_configs → environment variables (already displayed)
+ - fabio_validation → hostname, routing
+ - job_name → job name
+ - selected_dockerfile → which Dockerfile is being used
+
+ Implementation Steps
+
+ 1. Create _display_configuration_summary() function in src/main.py
+   - Extract values from state dict
+   - Create Rich Panel with multiple sections using Tables or formatted text
+   - Style values with confidence indicators where applicable
+ 2. Add table sections:
+ ┏━━━━━━━━━━━━━━━━━━━━━━━━━━ Job Configuration ━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+ ┃ Property        │ Value                              │ Source        ┃
+ ┣━━━━━━━━━━━━━━━━━┿━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┿━━━━━━━━━━━━━━━┫
+ ┃ Job Name        │ video-transcription                │ derived       ┃
+ ┃ Docker Image    │ registry.cluster:5000/video-...    │ user input    ┃
+ ┃ Network Mode    │ host                               │ inferred      ┃
+ ┃ CPU             │ 4000 MHz                           │ COMPUTE type  ┃
+ ┃ Memory          │ 8192 MB                            │ COMPUTE type  ┃
+ ┃ Health Check    │ GET /health                        │ inferred      ┃
+ ┃ Fabio Route     │ /transcribe (strip)                │ inferred      ┃
+ ┃ Vault Policy    │ transcription-policy               │ suggested     ┃
+ ┗━━━━━━━━━━━━━━━━━┷━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┷━━━━━━━━━━━━━━━┛
+ 3. Call display function after enrich phase, before question collection
+   - Location: after line ~339 in src/main.py where questions are processed
+   - Or: in the HitL loop when displaying for confirmation
+ 4. Add "Source" column to indicate where each value came from:
+   - inferred - derived from codebase analysis
+   - user input - explicitly provided by user
+   - suggested - AI suggestion with confidence
+   - default - cluster defaults
+
+ Display Location
+
+ Before questions - Display full configuration summary after enrich phase, before asking user for confirmation. User sees all tracked values upfront.
+
+ Detailed Implementation
+
+ Step 1: Add _display_configuration_summary() function
+
+ Location: src/main.py (after _display_env_config_table, around line 495)
+
+ def _display_configuration_summary(state: dict):
+     """Display comprehensive configuration summary before user confirmation."""
+     analysis = state.get("codebase_analysis", {})
+     fabio = state.get("fabio_validation", {})
+
+     # Job Configuration table
+     job_table = Table(title="Job Configuration")
+     job_table.add_column("Property", style="cyan")
+     job_table.add_column("Value", style="green")
+     job_table.add_column("Source", style="dim")
+
+     # Add rows for: job_name, docker_image, service_type, cpu, memory,
+     # network_mode, ports, health_check, fabio_route, vault_policy
+
+ Step 2: Extract values from state
+
+ Data sources:
+ - state["job_name"] → job name
+ - state["codebase_analysis"]["docker_image"] → docker image
+ - state["codebase_analysis"]["service_type"] → LIGHT/MEDIUM/HEAVY/COMPUTE
+ - state["codebase_analysis"]["resources"] → cpu, memory
+ - state["codebase_analysis"]["ports"] → port mappings
+ - state["codebase_analysis"]["health_check"] → health check config
+ - state["fabio_validation"] → routing configuration
+ - state["vault_suggestions"] → vault policies/paths
+
+ Step 3: Call display function
+
+ Location: src/main.py, in generate() function after enrich phase completes
+
+ Find where questions are processed (around line 339) and add:
+ # Display configuration summary before questions
+ _display_configuration_summary(result)
+
+ Step 4: Keep existing env var table
+
+ The existing _display_env_config_table() continues to be called for detailed env var editing.
+ The new summary provides overview of ALL values including a condensed env var count.
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+
+ Would you like to proceed?
+
+ Done! I've added a "Configuration Summary" table that will display before the environment variable table. It shows:
+
+  - Job Name - derived from codebase path or analysis
+  - Docker Image - from codebase analysis
+  - Service Type - LIGHT/MEDIUM/HEAVY/COMPUTE classification
+  - CPU/Memory - resource allocations with source indication
+  - Ports - detected port mappings
+  - Health Check - endpoint configuration
+  - Fabio Route - load balancer routing (with strip indicator)
+  - Vault Secrets - count of secrets needing Vault
+  - Env Variables - summary count by source type (fixed/consul/vault)
+  - Architecture - AMD64 requirement if detected
+  - Storage - CSI volume path if needed
+
+  The "Source" column indicates where each value came from: analysis, enrichment, derived, or the service type name.
+
+  Would you like me to run a test to show the new output format?
+
+
+
+Here is Claude's plan:
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Plan: Extractor Registry Architecture for Configuration Summary
+
+ Goal
+
+ Refactor the analysis phase to use a source-discovery → targeted-extraction pattern. Instead of trying to infer everything from Dockerfile + LLM, first discover
+ where information lives (build tools), then extract from those sources.
+
+ Architecture
+
+ ┌─────────────────────────────────────────────────────────────────────┐
+ │ PHASE 1: DISCOVER SOURCES                                           │
+ │ Find: build.yaml (jobforge), Makefile, docker-compose.yml, etc.     │
+ └─────────────────────────────┬───────────────────────────────────────┘
+                               │
+                               ▼
+ ┌─────────────────────────────────────────────────────────────────────┐
+ │ PHASE 2: EXTRACT (Registry Pattern)                                 │
+ │                                                                     │
+ │ EXTRACTORS = {                                                      │
+ │     "jobforge": JobforgeExtractor,     # build.yaml                 │
+ │     "makefile_docker": MakefileDockerExtractor,  # docker build     │
+ │     "makefile_compose": MakefileComposeExtractor, # docker-compose  │
+ │     "dockerfile": DockerfileExtractor, # Existing static parsing    │
+ │     "app_code": AppCodeExtractor,      # LLM inference (fallback)   │
+ │ }                                                                   │
+ │                                                                     │
+ │ For each discovered source → run appropriate extractor              │
+ └─────────────────────────────┬───────────────────────────────────────┘
+                               │
+                               ▼
+ ┌─────────────────────────────────────────────────────────────────────┐
+ │ PHASE 3: MERGE EXTRACTIONS                                          │
+ │ Priority: jobforge > makefile > dockerfile > app_code               │
+ │ Fill gaps from lower-priority sources                               │
+ └─────────────────────────────┬───────────────────────────────────────┘
+                               │
+                               ▼
+ ┌─────────────────────────────────────────────────────────────────────┐
+ │ PHASE 4: ENRICH (existing)                                          │
+ │ Vault validation, Consul, Fabio                                     │
+ └─────────────────────────────────────────────────────────────────────┘
+
+ What Extractors Provide
+
+ Each extractor returns a standardized ExtractionResult:
+
+ @dataclass
+ class ExtractionResult:
+     source_type: str          # "jobforge", "makefile", etc.
+     source_file: str          # Path to the file extracted from
+     confidence: float         # 0.0-1.0, how reliable this extraction is
+
+     # Extracted fields (all optional)
+     job_name: str | None
+     docker_image: str | None  # Full image with registry/tag
+     registry_url: str | None
+     image_name: str | None
+     image_tag: str | None
+
+     ports: list[PortConfig] | None
+     env_vars: dict[str, str] | None        # Fixed env vars
+     vault_secrets: list[VaultSecret] | None # Vault paths + mappings
+     vault_policies: list[str] | None
+
+     resources: ResourceConfig | None        # cpu, memory
+     health_check: HealthCheckConfig | None
+
+     requires_gpu: bool | None
+     constraints: list[str] | None
+
+ Initial Extractors (Phase 1)
+
+ 1. JobforgeExtractor
+
+ Source: build.yaml files following https://githu
+
+ Extracts from root level:
+ - image_name + registry_url + image_tags → full docker image
+ - resource_limits (global)
+
+ Extracts from test section (per JobForge spec):
+ - vault_policies
+ - vault_secrets (with full path + field mappings)
+ - env (environment variables)
+ - gpu_required
+ - constraints
+
+ Confidence: 0.95 (explicit configuration)
+
+ 2. MakefileDockerExtractor
+
+ Source: Makefile with docker build commands
+
+ Extracts (via LLM prompt):
+ - Image name from -t flag
+ - Registry from push commands
+ - Build args that become env vars
+
+ Confidence: 0.7 (requires parsing/inference)
+
+ 3. MakefileComposeExtractor
+
+ Source: Makefile that invokes docker-compose
+
+ Extracts (via LLM prompt + compose file):
+ - Service definitions
+ - Environment variables
+ - Port mappings
+ - Volume mounts
+
+ Confidence: 0.7
+
+ Files to Create
+
+ | File                             | Purpose                                           |
+ |----------------------------------|---------------------------------------------------|
+ | src/tools/extractors/__init__.py | Extractor registry and base classes               |
+ | src/tools/extractors/base.py     | ExtractionResult dataclass, BaseExtractor ABC     |
+ | src/tools/extractors/jobforge.py | JobforgeExtractor (YAML parsing, no LLM)          |
+ | src/tools/extractors/makefile.py | MakefileDockerExtractor, MakefileComposeExtractor |
+ | src/nodes/discover_sources.py    | New node to find all build-related files          |
+ | src/nodes/extract.py             | New node using extractor registry                 |
+ | src/nodes/merge.py               | Merge extractions with priority                   |
+ | prompts/makefile_extraction.json | LLM prompt for Makefile parsing (→ LangFuse)      |
+
+ Files to Modify
+
+ | File                 | Changes                                                            |
+ |----------------------|--------------------------------------------------------------------|
+ | src/graph.py         | Replace discover → analyze with discover_sources → extract → merge |
+ | src/nodes/analyze.py | Refactor to use merged extractions, keep LLM gap-filling           |
+ | src/main.py          | Update _display_configuration_summary() to show extraction sources |
+ | config/settings.py   | Add any new settings if needed                                     |
+
+ Updated Graph Flow
+
+ START
+   → discover_sources   (find build.yaml, Makefile, Dockerfile, etc.)
+   → [select]           (existing: pick Dockerfile if multiple)
+   → extract            (NEW: run extractors on discovered sources)
+   → merge              (NEW: combine extractions with priority)
+   → enrich             (existing: Vault/Consul/Fabio)
+   → question           (existing)
+   → collect            (existing)
+   → generate           (existing)
+   → ...
+
+ Implementation Order
+
+ Step 1: Base Infrastructure
+
+ 1. Create src/tools/extractors/base.py with ExtractionResult and BaseExtractor
+ 2. Create src/tools/extractors/__init__.py with registry
+
+ Step 2: JobforgeExtractor (First Test)
+
+ 1. Create src/tools/extractors/jobforge.py
+ 2. Parse build.yaml using PyYAML
+ 3. Map fields to ExtractionResult
+ 4. Test with tmp/build.yaml
+
+ Step 3: Discover Sources Node
+
+ 1. Create src/nodes/discover_sources.py
+ 2. Look for: build.yaml, Makefile, docker-compose.yml, Dockerfile
+ 3. Return dict of discovered sources
+
+ Step 4: Extract Node
+
+ 1. Create src/nodes/extract.py
+ 2. Iterate through discovered sources
+ 3. Run appropriate extractor for each
+ 4. Return list of ExtractionResult
+
+ Step 5: Merge Node
+
+ 1. Create src/nodes/merge.py
+ 2. Combine extractions with priority (jobforge > makefile > dockerfile)
+ 3. Output unified analysis dict
+
+ Step 6: Update Graph
+
+ 1. Modify src/graph.py to use new nodes
+ 2. Keep backward compatibility (if no extractors match, fall back to current behavior)
+
+ Step 7: Makefile Extractors
+
+ 1. Create prompts/makefile_extraction.json → push to LangFuse
+ 2. Implement MakefileDockerExtractor with LLM prompt
+ 3. Implement MakefileComposeExtractor
+
+ Step 8: Update Display
+
+ 1. Modify _display_configuration_summary() in src/main.py
+ 2. Show source attribution for each field
+
+ LangFuse Prompts
+
+ New prompts to create and push to LangFuse:
+
+ 1. makefile_docker_extraction - Extract docker build/push commands from Makefile
+ 2. makefile_compose_extraction - Extract docker-compose service definitions
+ 3. app_code_inference - Existing analysis prompt, renamed for clarity
+
+ Test Plan
+
+ 1. Unit tests for each extractor
+ 2. Integration test with test project (video-transcription):
+   - Should discover build.yaml
+   - JobforgeExtractor should extract:
+       - image_name: "video-transcription-ws"
+     - registry_url: "registry.cluster:5000"
+     - vault_secrets: 2 paths with field mappings
+     - env: S3_TRANSCRIBER_BUCKET, etc.
+ 3. Verify configuration summary shows populated values
+
+ Success Criteria
+
+ Running nomad-spec generate --path /path/to/video-transcription should:
+ 1. Discover build.yaml as primary source
+ 2. Extract all fields from it
+ 3. Display populated configuration summary:
+ | Job Name      | video-transcription-ws    | jobforge |
+ | Docker Image  | registry.cluster:5000/... | jobforge |
+ | Vault Secrets | 2 configured              | jobforge |
+ | Env Variables | 5 fixed, 2 vault          | jobforge |
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+
+Implementation Complete
+
+  I've implemented the extractor registry architecture. Here's what was created:
+
+  New Files Created
+
+  | File                             | Purpose                                               |
+  |----------------------------------|-------------------------------------------------------|
+  | src/tools/extractors/base.py     | ExtractionResult dataclass, BaseExtractor ABC         |
+  | src/tools/extractors/__init__.py | Extractor registry with @register_extractor decorator |
+  | src/tools/extractors/jobforge.py | JobforgeExtractor for build.yaml files                |
+  | src/nodes/discover_sources.py    | Discovers build.yaml, Makefile, Dockerfiles           |
+  | src/nodes/extract.py             | Runs extractors on discovered sources                 |
+  | src/nodes/merge.py               | Merges extractions with priority                      |
+
+  Files Modified
+
+  | File         | Changes                                                                        |
+  |--------------|--------------------------------------------------------------------------------|
+  | src/graph.py | New flow: discover_sources → select → extract → merge → analyze → enrich → ... |
+  | src/main.py  | _display_configuration_summary() now uses merged extraction data               |
+
+  Test Results
+
+  === DISCOVER SOURCES ===
+  Discovered sources: {'jobforge': 'tmp/build.yaml'}
+
+  === EXTRACT ===
+    - jobforge: job_name=video-transcription-ws, docker_image=registry.cluster:5000/video-transcription-ws:latest
+
+  === MERGE ===
+    job_name: video-transcription-ws (from jobforge)
+    docker_image: registry.cluster:5000/video-transcription-ws:latest (from jobforge)
+    resources: {'cpu': 8000, 'memory': 16384, 'disk': 20480} (from jobforge)
+
+  All 140 tests pass.
+
+Updated plan
+  ⎿  /plan to preview · ~/.claude/plans/gentle-fluttering-creek.md
+
+● I've written the plan. The implementation is straightforward:
+
+  1. src/graph.py: Add create_visualization_graph() function that mirrors the workflow structure but uses placeholder nodes (no LLM needed)
+  2. src/main.py: Add graph subcommand group with display command using Typer's add_typer() pattern
+
+  The command will work as:
+  nomad-spec graph display              # Show full workflow
+  nomad-spec graph display --no-deployment  # Without deploy/verify/fix nodes
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Ready to code?
+
+ Here is Claude's plan:
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Plan: Add nomad-spec graph display Command
+
+ Summary
+
+ Add a CLI command to display the LangGraph workflow as ASCII art, without requiring LLM configuration.
+
+ Files to Modify
+
+ 1. src/graph.py
+
+ Add create_visualization_graph() function (~50 lines) after create_workflow() (line 303).
+
+ This function builds the same graph topology but uses placeholder noop functions instead of actual node implementations, allowing visualization without LLM.
+
+ def create_visualization_graph(include_deployment: bool = True) -> StateGraph:
+     """Create graph structure for visualization (no LLM required)."""
+     def noop(state: dict) -> dict:
+         return state
+
+     workflow = StateGraph(dict)
+
+     # Add all nodes with placeholder functions
+     workflow.add_node("discover_sources", noop)
+     workflow.add_node("select", noop)
+     workflow.add_node("extract", noop)
+     # ... (mirrors create_workflow structure)
+
+     # Add edges (same as create_workflow)
+     workflow.add_edge(START, "discover_sources")
+     # ...
+
+     return workflow
+
+ 2. src/main.py
+
+ Add graph subcommand group (~30 lines) after validate command (line 339).
+
+ # Graph subcommand group
+ graph_app = typer.Typer(
+     name="graph",
+     help="Graph visualization commands",
+ )
+ app.add_typer(graph_app, name="graph")
+
+ @graph_app.command("display")
+ def graph_display(
+     include_deployment: bool = typer.Option(True, "--deployment/--no-deployment"),
+ ):
+     """Display the agent workflow graph as ASCII art."""
+     from src.graph import create_visualization_graph
+
+     workflow = create_visualization_graph(include_deployment=include_deployment)
+     compiled = workflow.compile()
+     ascii_output = compiled.get_graph().draw_ascii()
+
+     console.print(Panel(ascii_output, title="Nomad Job Spec Agent Workflow"))
+
+ Usage
+
+ nomad-spec graph display              # Full graph with deployment nodes
+ nomad-spec graph display --no-deployment  # Without deploy/verify/fix nodes
+
+ Dependencies
+
+ grandalf library is required for draw_ascii(). It's likely a transitive dependency of langgraph. Will verify during implementation and add to pyproject.toml if
+ needed.
+
+ Testing
+
+ - Run nomad-spec graph display and verify ASCII output
+ - Run with --no-deployment to verify fewer nodes appear
+
