@@ -916,10 +916,42 @@ def _display_configuration_summary(state: dict):
         else:
             table.add_row("Env Variables", "[dim]none[/dim]", "-")
 
-    # GPU requirement (from extraction)
-    requires_gpu = get_value("requires_gpu", False)
-    if requires_gpu:
-        table.add_row("GPU Required", "Yes", get_source("requires_gpu", "extraction"))
+    # GPU requirement (from gpu_detection or extraction)
+    gpu_detection = state.get("gpu_detection", {})
+    if gpu_detection:
+        requires_gpu = gpu_detection.get("requires_gpu", False)
+        gpu_confidence = gpu_detection.get("confidence", "unknown")
+        cuda_version = gpu_detection.get("cuda_version")
+        config_value = gpu_detection.get("config_value")
+        dockerfile_detected = gpu_detection.get("dockerfile_detected", False)
+
+        # Determine source display
+        if config_value is not None:
+            gpu_source = "config"
+        elif dockerfile_detected:
+            gpu_source = "dockerfile"
+        else:
+            gpu_source = "detection"
+
+        confidence_style = {
+            "high": "[green]high[/green]",
+            "medium": "[yellow]medium[/yellow]",
+            "low": "[red]low[/red]",
+        }.get(gpu_confidence, gpu_confidence)
+
+        if requires_gpu:
+            gpu_value = f"Yes ({confidence_style})"
+            if cuda_version:
+                gpu_value += f" [dim]CUDA {cuda_version}[/dim]"
+            table.add_row("GPU Required", gpu_value, gpu_source)
+        elif dockerfile_detected and config_value is False:
+            # Config explicitly disabled GPU even though Dockerfile has indicators
+            table.add_row("GPU Required", f"No (config override) [dim]CUDA {cuda_version or 'detected'}[/dim]", "config")
+    else:
+        # Fallback to old behavior if gpu_detection not available
+        requires_gpu = get_value("requires_gpu", False)
+        if requires_gpu:
+            table.add_row("GPU Required", "Yes", get_source("requires_gpu", "extraction"))
 
     # Architecture requirements
     requires_amd64 = get_value("requires_amd64", False)

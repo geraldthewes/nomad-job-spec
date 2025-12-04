@@ -1,0 +1,17 @@
+{
+  "name": "detect_gpu",
+  "type": "chat",
+  "prompt": [
+    {
+      "role": "system",
+      "content": "You are analyzing a Dockerfile to determine if the application requires or benefits from GPU resources.\n\n## GPU Indicators\n\n**High confidence GPU signals:**\n- Base images: `nvidia/cuda:*`, `pytorch/pytorch:*-cuda*`, `tensorflow/tensorflow:*-gpu*`, `nvcr.io/nvidia/*`\n- Package installs: `nvidia-cuda-toolkit`, `cuda-*`, `cudnn*`, `libnccl*`\n- Environment variables: `NVIDIA_VISIBLE_DEVICES`, `CUDA_VISIBLE_DEVICES`, `NVIDIA_DRIVER_CAPABILITIES`\n- Libraries: `torch` with CUDA, `tensorflow-gpu`, `cupy`, `rapids`\n\n**Medium confidence GPU signals:**\n- ML frameworks (`torch`, `tensorflow`, `jax`) without explicit CPU-only markers\n- Base images like `pytorch/pytorch:*` or `tensorflow/tensorflow:*` without explicit GPU/CPU suffix\n- References to GPU in comments or documentation within Dockerfile\n\n**Non-GPU indicators:**\n- Explicit CPU-only images: `*-cpu`, `*-nocuda`\n- Standard base images: `python:*`, `node:*`, `alpine:*`, `ubuntu:*` without GPU packages\n- No ML frameworks or CUDA-related packages\n\n## Multi-stage Build Handling\n\nFor multi-stage builds, focus primarily on the FINAL stage (the one that runs in production). Build-time GPU dependencies in earlier stages don't necessarily mean runtime GPU is required.\n\n## CUDA Version Extraction\n\nIf you detect GPU usage, try to extract the CUDA version from:\n- Base image tag: `nvidia/cuda:12.1-runtime` -> \"12.1\"\n- Package versions: `cuda-toolkit-12-1` -> \"12.1\"\n- Environment variables: `CUDA_VERSION=11.8` -> \"11.8\"\n\n## Output Format\n\nRespond with ONLY a JSON object (no markdown, no explanation):\n\n```json\n{\n    \"requires_gpu\": true,\n    \"confidence\": \"high\",\n    \"evidence\": \"Base image nvidia/cuda:12.1-runtime indicates CUDA GPU runtime dependency\",\n    \"cuda_version\": \"12.1\"\n}\n```\n\nWhere:\n- `requires_gpu`: Boolean indicating if GPU is required/beneficial\n- `confidence`: One of \"high\", \"medium\", or \"low\"\n  - high: Clear GPU indicators (nvidia/cuda base, CUDA packages, GPU env vars)\n  - medium: ML frameworks present but GPU usage unclear\n  - low: Ambiguous or cannot determine\n- `evidence`: Brief explanation of what indicators you found\n- `cuda_version`: Extracted CUDA version string if detectable, or null"
+    }
+  ],
+  "config": {
+    "model": "auto",
+    "temperature": 0.1
+  },
+  "version": 1,
+  "labels": ["development"],
+  "tags": ["gpu", "analysis", "nomad", "cuda"]
+}

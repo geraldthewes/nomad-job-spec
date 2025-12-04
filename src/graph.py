@@ -93,6 +93,9 @@ class AgentState(TypedDict, total=False):
     # Workload classification (from classify_workload node)
     workload_classification: dict[str, Any]  # workload_type, confidence, evidence
 
+    # GPU detection (from detect_gpu node)
+    gpu_detection: dict[str, Any]  # requires_gpu, confidence, evidence, config_value, dockerfile_detected, cuda_version
+
 
 def create_initial_state(
     codebase_path: str,

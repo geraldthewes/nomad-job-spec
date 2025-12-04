@@ -58,6 +58,7 @@ class TestCreateAnalysisSubgraph:
 
         nodes = subgraph.nodes
         assert "classify_workload" in nodes
+        assert "detect_gpu" in nodes
         assert "analyze_ports" in nodes
         assert "analyze" in nodes
         assert "enrich" in nodes
@@ -120,6 +121,7 @@ class TestCreateAnalysisSubgraphNode:
         # Check all expected output fields
         expected_fields = [
             "workload_classification",
+            "gpu_detection",
             "port_analysis",
             "codebase_analysis",
             "app_name",
@@ -150,6 +152,15 @@ def mock_llm_for_analysis():
                 "workload_type": "service",
                 "confidence": "high",
                 "evidence": "CMD uses uvicorn to run a web server"
+            }""")
+
+        elif "gpu" in content.lower() or "cuda" in content.lower():
+            # GPU detection response
+            return AIMessage(content="""{
+                "requires_gpu": false,
+                "confidence": "high",
+                "evidence": "No GPU-related packages or base images detected",
+                "cuda_version": null
             }""")
 
         elif "port" in content.lower() or "listening" in content.lower():

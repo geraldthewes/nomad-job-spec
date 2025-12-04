@@ -2,6 +2,7 @@
 
 This subgraph encapsulates the analysis pipeline:
 - classify_workload: Determine if app is service or batch job
+- detect_gpu: Detect GPU requirements from config and Dockerfile
 - analyze_ports: Determine port configuration
 - analyze: Codebase analysis with LLM
 - enrich: Infrastructure enrichment (Vault, Consul, Fabio)
@@ -20,6 +21,7 @@ from config.settings import Settings, get_settings
 from .analyze import create_analyze_node
 from .analyze_ports import create_analyze_ports_node
 from .classify_workload import create_classify_workload_node
+from .detect_gpu import create_detect_gpu_node
 from .enrich import create_enrich_node
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,7 @@ class AnalysisState(TypedDict, total=False):
 
     Internal/Output fields (produced by subgraph nodes):
         workload_classification: Classification result (workload_type, confidence, evidence)
+        gpu_detection: GPU detection result (requires_gpu, confidence, evidence, config_value, dockerfile_detected, cuda_version)
         port_analysis: Port configuration analysis from analyze_ports
         codebase_analysis: Full codebase analysis from analyze node
         app_name: Extracted application name
@@ -61,6 +64,7 @@ class AnalysisState(TypedDict, total=False):
 
     # Internal state (passed between nodes)
     workload_classification: dict[str, Any]
+    gpu_detection: dict[str, Any]
     port_analysis: dict[str, Any]
     codebase_analysis: dict[str, Any]
 
@@ -82,7 +86,7 @@ def create_analysis_subgraph(
     """Create the analysis subgraph.
 
     This subgraph orchestrates the analysis pipeline:
-    classify_workload -> analyze_ports -> analyze -> enrich
+    classify_workload -> detect_gpu -> analyze_ports -> analyze -> enrich
 
     Args:
         llm: LLM instance for analysis nodes.
@@ -96,6 +100,7 @@ def create_analysis_subgraph(
 
     # Create node functions using existing factories
     classify_workload_node = create_classify_workload_node(llm)
+    detect_gpu_node = create_detect_gpu_node(llm)
     analyze_ports_node = create_analyze_ports_node(llm)
     analyze_node = create_analyze_node(llm)
     enrich_node = create_enrich_node(settings)
@@ -104,13 +109,15 @@ def create_analysis_subgraph(
     workflow = StateGraph(AnalysisState)
 
     workflow.add_node("classify_workload", classify_workload_node)
+    workflow.add_node("detect_gpu", detect_gpu_node)
     workflow.add_node("analyze_ports", analyze_ports_node)
     workflow.add_node("analyze", analyze_node)
     workflow.add_node("enrich", enrich_node)
 
-    # Linear flow: classify_workload -> analyze_ports -> analyze -> enrich
+    # Linear flow: classify_workload -> detect_gpu -> analyze_ports -> analyze -> enrich
     workflow.add_edge(START, "classify_workload")
-    workflow.add_edge("classify_workload", "analyze_ports")
+    workflow.add_edge("classify_workload", "detect_gpu")
+    workflow.add_edge("detect_gpu", "analyze_ports")
     workflow.add_edge("analyze_ports", "analyze")
     workflow.add_edge("analyze", "enrich")
     workflow.add_edge("enrich", END)
@@ -171,6 +178,7 @@ def create_analysis_subgraph_node(
         # Map AnalysisState -> AgentState (return outputs)
         return {
             "workload_classification": result.get("workload_classification", {}),
+            "gpu_detection": result.get("gpu_detection", {}),
             "port_analysis": result.get("port_analysis", {}),
             "codebase_analysis": result.get("codebase_analysis", {}),
             "app_name": result.get("app_name", ""),
