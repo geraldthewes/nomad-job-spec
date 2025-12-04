@@ -16,6 +16,8 @@ import hvac
 from hvac.exceptions import Forbidden, InvalidPath, VaultError
 from langchain_core.tools import tool
 
+from src.memory import search_env_var_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,7 +53,7 @@ class EnvVarConfig:
     """
 
     name: str  # Environment variable name
-    source: Literal["fixed", "consul", "vault"]  # Source type
+    source: Literal["fixed", "consul", "vault", "unknown"]  # Source type
     value: str  # Fixed value, Consul KV path, or Vault path
     confidence: float = 0.0  # 0.0-1.0 confidence in the suggestion
 
@@ -415,6 +417,10 @@ def suggest_env_configs(
         "CONSUL_HOST": ("consul.service.consul", 0.6),
         "CONSUL_HTTP_ADDR": ("http://consul.service.consul:8500", 0.6),
         "CONSUL_ADDR": ("consul.service.consul:8500", 0.6),
+        "CONSUL_PORT": ("8500", 0.6),
+        # Vault infrastructure
+        "VAULT_ADDR": ("http://vault.service.consul:8200", 0.6),
+        "VAULT_SKIP_VERIFY": ("false", 0.5),
         "LOG_LEVEL": ("info", 0.5),
         "DEBUG": ("false", 0.5),
         "ENVIRONMENT": ("production", 0.4),
@@ -446,6 +452,19 @@ def suggest_env_configs(
 
     for env_var in env_vars:
         env_upper = env_var.upper()
+
+        # Check memory first for previously configured variables (global)
+        memory_result = search_env_var_config(env_upper)
+        if memory_result:
+            configs.append(
+                EnvVarConfig(
+                    name=env_var,
+                    source=memory_result.source,  # type: ignore[arg-type]
+                    value=memory_result.value_pattern,
+                    confidence=0.8,  # High confidence for remembered configs
+                )
+            )
+            continue
 
         # Check for exact fixed pattern match first
         if env_upper in fixed_patterns:
@@ -537,15 +556,13 @@ def suggest_env_configs(
             )
             continue
 
-        # Default: suggest Consul for unknown configuration
-        path_component = env_var.lower().replace("_", "/")
-        consul_path = f"{app_name}/config/{path_component}"
+        # Default: mark as unknown - requires user input
         configs.append(
             EnvVarConfig(
                 name=env_var,
-                source="consul",
-                value=consul_path,
-                confidence=0.3,
+                source="unknown",
+                value="<requires input>",
+                confidence=0.0,
             )
         )
 

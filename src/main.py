@@ -19,6 +19,7 @@ from langgraph.types import Command
 from config.settings import get_settings
 from src.llm.provider import get_llm
 from src.graph import compile_graph, create_initial_state
+from src.memory import save_env_var_configs_batch
 from src.observability import get_observability
 from src.tools.infra_status import InfraHealthReport, check_infrastructure_from_settings
 
@@ -612,6 +613,8 @@ def _collect_env_config_responses(
     """
     # Work with a copy to avoid mutating the original
     current_configs = [dict(c) for c in configs]
+    # Keep reference to original for memory comparison
+    original_configs = [dict(c) for c in configs]
 
     while True:
         # Display summary table
@@ -625,6 +628,10 @@ def _collect_env_config_responses(
         )
 
         if choice == "confirm":
+            # Save user choices to memory for future runs
+            saved = save_env_var_configs_batch(current_configs, original_configs)
+            if saved > 0:
+                console.print(f"[dim]Saved {saved} env var config(s) to memory for future use.[/dim]")
             return current_configs
 
         # Edit mode: step through each variable
@@ -634,11 +641,13 @@ def _collect_env_config_responses(
             var_name = cfg["name"]
             console.print(f"[cyan][{idx}/{len(current_configs)}][/cyan] [bold]{var_name}[/bold]")
 
-            # Ask for source type
+            # Ask for source type (default to "fixed" if currently "unknown")
+            current_source = cfg["source"]
+            default_source = current_source if current_source != "unknown" else "fixed"
             new_source = prompt_with_quit(
                 "  Source",
                 choices=["fixed", "consul", "vault"],
-                default=cfg["source"]
+                default=default_source
             )
 
             # Provide context-appropriate hint for value
@@ -649,9 +658,12 @@ def _collect_env_config_responses(
             else:
                 hint = "Vault path (e.g., secret/data/.../key)"
 
+            # Default to empty if value is placeholder
+            current_value = cfg["value"]
+            default_value = "" if current_value == "<requires input>" else current_value
             new_value = prompt_with_quit(
                 f"  {hint}",
-                default=cfg["value"]
+                default=default_value
             )
 
             # Update the config
@@ -687,8 +699,10 @@ def _display_env_config_table(configs: list[dict]):
             source_str = "[blue]fixed[/blue]"
         elif source == "consul":
             source_str = "[yellow]consul[/yellow]"
-        else:
+        elif source == "vault":
             source_str = "[magenta]vault[/magenta]"
+        else:  # unknown
+            source_str = "[red]unknown[/red]"
 
         # Confidence styling
         if confidence >= 0.9:
