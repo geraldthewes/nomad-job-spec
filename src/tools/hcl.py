@@ -405,8 +405,9 @@ def _build_task_block(config: JobConfig) -> str:
     if config.env_vars:
         parts.append(_build_env_block(config))
 
-    # Service registration
-    parts.append(_build_service_block(config))
+    # Service registration (skip for batch jobs)
+    if config.job_type != "batch":
+        parts.append(_build_service_block(config))
 
     # Close task
     parts.append("    }")

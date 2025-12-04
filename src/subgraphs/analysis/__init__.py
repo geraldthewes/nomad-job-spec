@@ -1,6 +1,7 @@
 """Analysis subgraph package.
 
 This package contains the analysis subgraph and its component nodes:
+- classify_workload: Workload type classification (service vs batch)
 - analyze_ports: Port configuration analysis
 - analyze: Codebase analysis with LLM
 - enrich: Infrastructure enrichment (Vault, Consul, Fabio)

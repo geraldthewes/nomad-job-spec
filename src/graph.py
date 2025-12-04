@@ -90,6 +90,9 @@ class AgentState(TypedDict, total=False):
     # Port configurability analysis (from analyze_ports node)
     port_analysis: dict[str, Any]  # Port env var mappings and warnings
 
+    # Workload classification (from classify_workload node)
+    workload_classification: dict[str, Any]  # workload_type, confidence, evidence
+
 
 def create_initial_state(
     codebase_path: str,
@@ -148,6 +151,8 @@ def create_initial_state(
         "extraction_sources": {},
         # Port configurability analysis
         "port_analysis": {},
+        # Workload classification
+        "workload_classification": {},
     }
 
 

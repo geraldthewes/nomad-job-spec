@@ -783,6 +783,18 @@ def _display_configuration_summary(state: dict):
     job_source = get_source("job_name", "derived")
     table.add_row("Job Name", job_name, job_source)
 
+    # Workload classification (service vs batch)
+    workload_class = state.get("workload_classification", {})
+    workload_type = workload_class.get("workload_type", "service")
+    workload_confidence = workload_class.get("confidence", "unknown")
+    confidence_style = {
+        "high": "[green]high[/green]",
+        "medium": "[yellow]medium[/yellow]",
+        "low": "[red]low[/red]",
+        "user_confirmed": "[cyan]confirmed[/cyan]",
+    }.get(workload_confidence, workload_confidence)
+    table.add_row("Workload Type", f"{workload_type} ({confidence_style})", "classification")
+
     # Docker image
     docker_image = get_value("docker_image", "")
     if docker_image:

@@ -24,7 +24,36 @@ def generate_questions_node(state: dict[str, Any]) -> dict[str, Any]:
     env_var_configs = state.get("env_var_configs", [])
     vault_suggestions = state.get("vault_suggestions", {})  # Legacy fallback
     fabio_validation = state.get("fabio_validation", {})
+    workload_classification = state.get("workload_classification", {})
     questions = []
+
+    # Workload type confirmation for low confidence classifications
+    workload_confidence = workload_classification.get("confidence", "high")
+    if workload_confidence == "low":
+        workload_type = workload_classification.get("workload_type", "service")
+        evidence = workload_classification.get("evidence", "Unable to determine from Dockerfile")
+        workload_q = {
+            "type": "workload_type",
+            "prompt": (
+                f"Workload classified as '{workload_type}' with low confidence. "
+                f"Reason: {evidence}. Is this correct?"
+            ),
+            "current_type": workload_type,
+            "options": [
+                {
+                    "value": "service",
+                    "label": "Service (long-running)",
+                    "description": "Web servers, APIs, daemons that run continuously",
+                },
+                {
+                    "value": "batch",
+                    "label": "Batch (run-to-completion)",
+                    "description": "Scripts, data migrations, one-time tasks that exit when done",
+                },
+            ],
+            "default": workload_type,
+        }
+        questions.append(workload_q)
 
     # Check if image is missing
     dockerfile = analysis.get("dockerfile")

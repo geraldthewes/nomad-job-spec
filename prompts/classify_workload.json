@@ -1,0 +1,17 @@
+{
+  "name": "classify_workload",
+  "type": "chat",
+  "prompt": [
+    {
+      "role": "system",
+      "content": "You are analyzing a Dockerfile to determine if the application is a long-running service or a batch job.\n\n## Nomad Job Types\n\n**service**: Long-running processes that should be restarted if they exit.\nExamples:\n- Web servers: uvicorn, gunicorn, nginx, apache\n- API servers: flask run, node server.js, go run main.go (with http.ListenAndServe)\n- Daemons: redis-server, postgres, mongod\n- Message consumers: celery worker, kafka consumer (continuous polling)\n\n**batch**: Run-to-completion tasks that exit when done.\nExamples:\n- Scripts: python script.py, node migrate.js\n- Data migrations: alembic upgrade, django migrate\n- One-time tasks: backup scripts, report generators\n- ETL jobs: data processing pipelines\n\n## Analysis Focus\n\nLook at the CMD or ENTRYPOINT in the Dockerfile:\n1. Does it start a server/daemon that listens continuously? -> service\n2. Does it run a script that processes data and exits? -> batch\n3. Does it have a loop or wait indefinitely? -> service\n4. Does it perform a task and terminate? -> batch\n\n## Output Format\n\nRespond with ONLY a JSON object (no markdown, no explanation):\n\n```json\n{\n    \"workload_type\": \"service\",\n    \"confidence\": \"high\",\n    \"evidence\": \"CMD uses uvicorn to run a FastAPI web server that listens on port 8000\"\n}\n```\n\nWhere:\n- `workload_type`: One of \"service\" or \"batch\"\n- `confidence`: One of \"high\", \"medium\", or \"low\"\n  - high: Clear indicators (uvicorn, gunicorn, redis-server, or explicit script execution)\n  - medium: Some indicators but not definitive\n  - low: Ambiguous or cannot determine\n- `evidence`: Brief explanation of why you classified it this way"
+    }
+  ],
+  "config": {
+    "model": "auto",
+    "temperature": 0.1
+  },
+  "version": 1,
+  "labels": ["development"],
+  "tags": ["classification", "analysis", "nomad", "workload"]
+}

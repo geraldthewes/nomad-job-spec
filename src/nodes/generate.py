@@ -194,6 +194,15 @@ def generate_spec_node(
     nomad_info = state.get("nomad_info", {})
     env_var_configs = state.get("env_var_configs", [])
 
+    # Get workload classification (service vs batch)
+    # Check if user overrode the classification via question response
+    workload_classification = state.get("workload_classification", {}).copy()
+    for key, value in user_responses.items():
+        if isinstance(value, dict) and value.get("type") == "workload_type":
+            # User confirmed or changed the workload type
+            workload_classification["workload_type"] = value.get("value", "service")
+            workload_classification["confidence"] = "user_confirmed"
+
     # Extract confirmed env configs from user responses if available
     confirmed_env_configs = _extract_confirmed_env_configs(user_responses, env_var_configs)
 
@@ -233,7 +242,7 @@ def generate_spec_node(
     with obs.span("parse_llm_response") as span:
         try:
             config_dict = _parse_llm_response(response_text)
-            # Pass nomad_info, env_var_configs, and network_mode for proper configuration
+            # Pass nomad_info, env_var_configs, network_mode, and workload_classification
             config = _build_job_config(
                 config_dict,
                 analysis,
@@ -241,6 +250,7 @@ def generate_spec_node(
                 nomad_info,
                 env_var_configs=confirmed_env_configs,
                 network_mode=network_mode,
+                workload_classification=workload_classification,
             )
             span.end(output={"job_name": config.job_name, "service_type": str(config.service_type)})
         except Exception as e:
@@ -457,6 +467,7 @@ def _build_job_config(
     nomad_info: dict[str, Any] | None = None,
     env_var_configs: list[dict] | None = None,
     network_mode: NetworkMode = NetworkMode.BRIDGE,
+    workload_classification: dict[str, Any] | None = None,
 ) -> JobConfig:
     """Build JobConfig from LLM response and analysis.
 
@@ -467,10 +478,20 @@ def _build_job_config(
         nomad_info: Nomad version info.
         env_var_configs: Confirmed multi-source env var configurations.
         network_mode: Network mode (bridge or host) from user response.
+        workload_classification: Workload classification with workload_type, confidence, evidence.
     """
     # Get job name
     job_name = config_dict.get("job_name", "unnamed-job")
     job_name = sanitize_job_name(job_name)
+
+    # Get job type from workload classification (defaults to "service")
+    job_type = "service"
+    if workload_classification:
+        job_type = workload_classification.get("workload_type", "service")
+        # Validate job_type is one of the allowed values
+        if job_type not in ("service", "batch", "system"):
+            logger.warning(f"Invalid job_type '{job_type}', defaulting to service")
+            job_type = "service"
 
     # Get image
     image = config_dict.get("image", "")
@@ -589,6 +610,7 @@ def _build_job_config(
     # Build config with multi-source env vars
     return JobConfig(
         job_name=job_name,
+        job_type=job_type,
         datacenters=[settings.nomad_datacenter],
         namespace=settings.nomad_namespace,
         region=settings.nomad_region,

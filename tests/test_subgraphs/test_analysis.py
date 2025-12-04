@@ -57,6 +57,7 @@ class TestCreateAnalysisSubgraph:
         subgraph = create_analysis_subgraph(mock_llm, mock_settings)
 
         nodes = subgraph.nodes
+        assert "classify_workload" in nodes
         assert "analyze_ports" in nodes
         assert "analyze" in nodes
         assert "enrich" in nodes
@@ -118,6 +119,7 @@ class TestCreateAnalysisSubgraphNode:
 
         # Check all expected output fields
         expected_fields = [
+            "workload_classification",
             "port_analysis",
             "codebase_analysis",
             "app_name",
@@ -142,7 +144,15 @@ def mock_llm_for_analysis():
         """Return mock responses based on message content."""
         content = str(messages[-1].content) if messages else ""
 
-        if "port" in content.lower() or "listening" in content.lower():
+        if "workload" in content.lower() or "batch" in content.lower():
+            # Workload classification response
+            return AIMessage(content="""{
+                "workload_type": "service",
+                "confidence": "high",
+                "evidence": "CMD uses uvicorn to run a web server"
+            }""")
+
+        elif "port" in content.lower() or "listening" in content.lower():
             # Port analysis response
             return AIMessage(content="""{
                 "type": "env_var",
