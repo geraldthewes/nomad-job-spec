@@ -23,7 +23,7 @@ _memory_client: Memory | None = None
 def get_memory_client() -> Memory | None:
     """Get or create the global Mem0 client instance.
 
-    Returns None if memory is disabled in settings.
+    Returns None if memory is disabled in settings or unavailable.
     """
     global _memory_client
     settings = get_settings()
@@ -32,17 +32,21 @@ def get_memory_client() -> Memory | None:
         return None
 
     if _memory_client is None:
-        config = {
-            "vector_store": {
-                "provider": "qdrant",
-                "config": {
-                    "host": settings.qdrant_host,
-                    "port": settings.qdrant_port,
-                    "collection_name": settings.qdrant_collection,
+        try:
+            config = {
+                "vector_store": {
+                    "provider": "qdrant",
+                    "config": {
+                        "host": settings.qdrant_host,
+                        "port": settings.qdrant_port,
+                        "collection_name": settings.qdrant_collection,
+                    },
                 },
-            },
-        }
-        _memory_client = Memory.from_config(config)
+            }
+            _memory_client = Memory.from_config(config)
+        except Exception:
+            # Qdrant not available - memory features disabled
+            return None
 
     return _memory_client
 
@@ -56,23 +60,23 @@ def search_env_var_config(var_name: str) -> EnvVarMemory | None:
     Returns:
         EnvVarMemory if found, None otherwise.
     """
-    client = get_memory_client()
-    if client is None:
-        return None
+    try:
+        client = get_memory_client()
+        if client is None:
+            return None
 
-    # Search for exact env var configuration
-    query = f"ENV_VAR_CONFIG: {var_name}"
-    results = client.search(query, user_id="global", limit=1)
+        # Search for exact env var configuration
+        query = f"ENV_VAR_CONFIG: {var_name}"
+        results = client.search(query, user_id="global", limit=1)
 
-    if not results or not results.get("results"):
-        return None
+        if not results or not results.get("results"):
+            return None
 
-    # Parse the memory content
-    for result in results["results"]:
-        memory_text = result.get("memory", "")
-        if f"ENV_VAR_CONFIG: {var_name}" in memory_text:
-            # Parse: "ENV_VAR_CONFIG: VAR_NAME -> source=X, value_pattern=Y"
-            try:
+        # Parse the memory content
+        for result in results["results"]:
+            memory_text = result.get("memory", "")
+            if f"ENV_VAR_CONFIG: {var_name}" in memory_text:
+                # Parse: "ENV_VAR_CONFIG: VAR_NAME -> source=X, value_pattern=Y"
                 parts = memory_text.split(" -> ", 1)
                 if len(parts) == 2:
                     config_part = parts[1]
@@ -91,8 +95,9 @@ def search_env_var_config(var_name: str) -> EnvVarMemory | None:
                             source=source,
                             value_pattern=value_pattern,
                         )
-            except Exception:
-                pass
+    except Exception:
+        # Memory unavailable - gracefully continue without memory
+        pass
 
     return None
 
@@ -108,17 +113,16 @@ def save_env_var_config(var_name: str, source: str, value: str) -> bool:
     Returns:
         True if saved successfully, False otherwise.
     """
-    client = get_memory_client()
-    if client is None:
-        return False
-
-    # For value patterns, generalize app-specific paths
-    # e.g., "myapp/config/foo" -> "{app_name}/config/foo"
-    value_pattern = value
-
-    memory_text = f"ENV_VAR_CONFIG: {var_name} -> source={source}, value_pattern={value_pattern}"
-
     try:
+        client = get_memory_client()
+        if client is None:
+            return False
+
+        # For value patterns, generalize app-specific paths
+        # e.g., "myapp/config/foo" -> "{app_name}/config/foo"
+        value_pattern = value
+
+        memory_text = f"ENV_VAR_CONFIG: {var_name} -> source={source}, value_pattern={value_pattern}"
         client.add(memory_text, user_id="global")
         return True
     except Exception:
