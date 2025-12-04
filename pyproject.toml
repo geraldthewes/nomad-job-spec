@@ -50,6 +50,7 @@ dependencies = [
     # Memory layer
     "mem0ai>=0.1.0",
     "qdrant-client>=1.9.0",
+    "ollama>=0.4.0",  # For Ollama embeddings
 
     # Observability
     "langfuse>=2.0.0",

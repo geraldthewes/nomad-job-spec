@@ -122,6 +122,14 @@ class Settings(BaseSettings):
         default=True,
         description="Enable memory layer (Mem0)",
     )
+    ollama_host: str = Field(
+        default="http://localhost:11434",
+        description="Ollama server URL for embeddings",
+    )
+    ollama_embed_model: str = Field(
+        default="mxbai-embed-large",
+        description="Ollama embedding model name",
+    )
 
     # Observability Configuration (LangFuse)
     # Both public and secret keys are required when langfuse_enabled=True

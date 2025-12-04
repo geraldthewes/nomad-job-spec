@@ -156,8 +156,17 @@ def get_memory_client() -> Memory | None:
                     "config": {
                         "client": qdrant_client,
                         "collection_name": settings.qdrant_collection,
+                        "embedding_model_dims": 1024,  # mxbai-embed-large dimensions
                     },
                 },
+                "embedder": {
+                    "provider": "ollama",
+                    "config": {
+                        "model": settings.ollama_embed_model,
+                        "ollama_base_url": settings.ollama_host,
+                    },
+                },
+                "version": "v1.1",
             }
             logger.debug(
                 f"Initializing Mem0 with Qdrant at "
