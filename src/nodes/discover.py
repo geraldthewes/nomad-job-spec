@@ -26,15 +26,10 @@ def discover_dockerfiles_node(state: dict[str, Any]) -> dict[str, Any]:
         Updated state with 'dockerfiles_found' and optionally 'selected_dockerfile'.
     """
     obs = get_observability()
-    trace = obs.create_trace(
-        name="discover_dockerfiles_node",
-        input={"codebase_path": state.get("codebase_path")},
-    )
 
     codebase_path = state.get("codebase_path")
     if not codebase_path:
-        if trace:
-            trace.end(level="ERROR", status_message="No codebase path provided")
+        logger.error("No codebase path provided")
         return {
             **state,
             "dockerfiles_found": [],
@@ -47,7 +42,7 @@ def discover_dockerfiles_node(state: dict[str, Any]) -> dict[str, Any]:
     if codebase_path.startswith(("http://", "https://", "git@")):
         from src.tools.codebase import clone_repository
 
-        with obs.span("clone_repository", trace=trace, input={"url": codebase_path}) as span:
+        with obs.span("clone_repository", input={"url": codebase_path}) as span:
             codebase_path = clone_repository(codebase_path)
             path = Path(codebase_path)
             span.end(output={"cloned_path": codebase_path})
@@ -55,10 +50,7 @@ def discover_dockerfiles_node(state: dict[str, Any]) -> dict[str, Any]:
             state = {**state, "codebase_path": codebase_path}
 
     if not path.exists():
-        if trace:
-            trace.end(
-                level="ERROR", status_message=f"Path does not exist: {codebase_path}"
-            )
+        logger.error(f"Path does not exist: {codebase_path}")
         return {
             **state,
             "dockerfiles_found": [],
@@ -66,7 +58,7 @@ def discover_dockerfiles_node(state: dict[str, Any]) -> dict[str, Any]:
         }
 
     # Find all Dockerfiles
-    with obs.span("find_dockerfiles", trace=trace, input={"path": str(path)}) as span:
+    with obs.span("find_dockerfiles", input={"path": str(path)}) as span:
         dockerfiles_found = []
         for dockerfile_path in path.glob("**/Dockerfile*"):
             # Skip directories, backup files, and documentation
@@ -96,8 +88,6 @@ def discover_dockerfiles_node(state: dict[str, Any]) -> dict[str, Any]:
     # Log discovery results - selection happens via interrupt
     selected_dockerfile = None
     if len(dockerfiles_found) == 0:
-        if trace:
-            trace.end(level="ERROR", status_message="No Dockerfiles found in codebase")
         raise FileNotFoundError(
             f"No Dockerfiles found in {codebase_path}. "
             "Please ensure the codebase contains a Dockerfile."
@@ -107,15 +97,6 @@ def discover_dockerfiles_node(state: dict[str, Any]) -> dict[str, Any]:
     else:
         logger.info(
             f"Found {len(dockerfiles_found)} Dockerfiles - user selection required"
-        )
-
-    if trace:
-        trace.end(
-            output={
-                "dockerfiles_found": dockerfiles_found,
-                "count": len(dockerfiles_found),
-                "auto_selected": selected_dockerfile,
-            }
         )
 
     return {

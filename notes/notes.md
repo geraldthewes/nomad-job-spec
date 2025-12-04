@@ -4485,3 +4485,317 @@ Updated plan
  - Run nomad-spec graph display and verify ASCII output
  - Run with --no-deployment to verify fewer nodes appear
 
+● Reverted. The core issue is that LangGraph's get_graph() has a bug with StateGraph(dict) and conditional edges. To visualize the real graph, you'd need to
+  either:
+
+  1. Fix the state type in create_workflow to use TypedDict instead of dict
+  2. Wait for a LangGraph fix
+  3. Use a different visualization approach
+
+  Summary
+
+  New Files
+
+  - src/nodes/analyze_ports.py - Port configurability analysis node with:
+    - Static regex-based detection for Python, Node.js, Go, and shell patterns
+    - LLM-assisted analysis (when LLM is available)
+    - Generates recommended_env_mappings like {"APP_PORT": "${NOMAD_PORT_http}"}
+  - prompts/analyze_ports.json - LLM prompt for port analysis
+
+  Modified Files
+
+  - src/graph.py - Added port_analysis state field and inserted node in workflow: merge → analyze_ports → analyze
+  - src/nodes/enrich.py - Applies port env mappings with source="nomad"
+  - src/nodes/generate.py - Handles source="nomad" env vars in HCL generation
+  - src/tools/extractors/base.py - Added is_configurable, env_var, default_value to PortConfig
+
+  Test Results
+
+  For video-transcription, the tool now correctly detects:
+  APP_PORT = "${NOMAD_PORT_http}"
+
+  This ensures that when generating the HCL, APP_PORT will use Nomad's dynamic port allocation instead of being marked as "fixed: 8080".
+
+
+All changes complete. Here's a summary of what was implemented:
+
+  Summary
+
+  Flow Redesign Complete
+
+  Before:
+  discover_sources → [select Dockerfile] → analyze_build_system → extract → ...
+
+  After:
+  discover_sources → analyze_build_system → [confirm Dockerfile] → extract → ...
+
+  Files Modified
+
+  | File                              | Changes                                                                                             |
+  |-----------------------------------|-----------------------------------------------------------------------------------------------------|
+  | src/nodes/analyze_build_system.py | Added dockerfile_used to LLM prompt and response handling                                           |
+  | src/nodes/confirm_dockerfile.py   | New file - confirmation node with should_confirm_dockerfile()                                       |
+  | src/graph.py                      | Rewired edges, updated imports, changed interrupt_before                                            |
+  | src/main.py                       | Added _collect_dockerfile_confirmation(), _manual_dockerfile_selection(), _auto_select_dockerfile() |
+  | prompts/analyze_build_system.json | Added dockerfile_used field, bumped to version 2                                                    |
+
+  User Experience
+
+  When running the tool, users will now see:
+  Analyzing build system...
+
+  Build system analysis:
+    Mechanism: docker
+    Dockerfile: Dockerfile
+
+  Use this Dockerfile? [y/n]:
+
+  If the LLM identifies a Dockerfile that wasn't found in discovery, users see a warning and fall back to manual selection.
+
+ Changes Made
+
+  1. prompts/analyze_ports.json (pushed to LangFuse v2)
+
+  Replaced broad port analysis with focused prompt that asks: "What port/env var is this app listening on?" - returns single answer, not all port vars.
+
+  2. src/nodes/analyze_ports.py (simplified)
+
+  - Removed _static_port_env_detection() - no longer scans for ALL port vars
+  - Removed _is_app_listening_port_var() - hacky regex filter no longer needed
+  - Removed _get_port_relevant_code() - was gathering too many files
+  - Simplified to single LLM query returning: {type, value, default_port, evidence}
+  - Output now includes supports_dynamic_port boolean
+
+  3. src/nodes/question.py
+
+  Added network mode question when supports_dynamic_port is true:
+  - Bridge (recommended) - Nomad allocates dynamic port
+  - Host - App binds directly to host network
+
+  4. src/nodes/enrich.py
+
+  Updated to use recommended_env_mapping (singular) instead of recommended_env_mappings (plural with many vars)
+
+  5. src/nodes/generate.py
+
+  - Added _extract_network_mode() helper
+  - Passes user's network mode choice to JobConfig
+
+  Result
+
+  Now CONSUL_PORT and SERVICE_PORT will NOT be incorrectly mapped to ${NOMAD_PORT_http}. Only the actual app listening port (e.g., APP_PORT) detected by the LLM
+   will be mapped, and users can choose host vs bridge networking.
+
+ Let me provide a summary of what was fixed:
+
+  Summary of Changes
+
+  Problem
+
+  The network_mode question was being added to the questions list but not displayed to the user.
+
+  Root Cause
+
+  The code was using the older interrupt_before pattern (pausing before a pass-through node) instead of the proper LangGraph interrupt() function inside the
+  node, as documented at https://langchain-ai.github.io/langgraph/how-tos/human_in_the_loop/wait-user-input/
+
+  Changes Made
+
+  1. src/nodes/question.py:
+    - Added from langgraph.types import interrupt
+    - Updated collect_responses_node to call interrupt(questions) internally and return user_responses from the interrupt
+  2. src/graph.py:
+    - Removed "collect" from interrupt_before (the interrupt now happens inside the node)
+  3. src/main.py:
+    - Added from langgraph.types import Command
+    - Get questions from interrupt value: task.interrupts[0].value
+    - Resume with Command(resume=responses) instead of graph.update_state()
+    - Added _auto_respond_to_questions() for --no-questions mode
+  4. src/nodes/question.py (port logic):
+    - Consolidated port-related questions based on port_analysis
+    - Only ask "What port?" if port is unknown
+    - Ask network_mode question if app supports dynamic ports
+    - Don't ask anything if port is hardcoded
+  5. Cleanup: Removed debug print statements from analyze_ports.py, enrich.py, question.py
+
+
+
+
+  Changes Made
+
+  Core Integration Files:
+  - src/observability/__init__.py - Changed span() method to use client.start_as_current_span() for context-aware nesting
+  - src/graph.py - Removed callback attachment at compile time (was causing LLM calls to appear as top-level traces)
+  - src/main.py - Added callback handler passed to graph.stream() config with start_as_current_observation() wrapper for root trace
+
+  11 Node Files Updated (removed obs.create_trace() and trace=trace parameters):
+  - discover_sources.py, analyze_build_system.py, confirm_dockerfile.py
+  - analyze.py, analyze_ports.py, enrich.py
+  - generate.py (two functions), discover.py, extract.py, merge.py, validate.py
+
+  Expected Results
+
+  With these changes, Langfuse should now show:
+  1. Single trace per graph execution with the full flow: __start__ → discover → analyze → ... → validate → __end__
+  2. LLM calls nested under their node spans (ChatOpenAI calls will appear under analyze_ports, generate, etc.)
+  3. Tool call spans visible within their respective nodes (file I/O, parsing, cloning)
+
+  Verification
+
+  - All 14 observability tests pass
+  - All modules compile successfully
+
+  The changes are ready to commit. Would you like me to commit them, or would you prefer to test against your Langfuse instance first to verify the traces
+  appear correctly?
+
+● All done! Here's a summary of the changes:
+
+  Changes Made
+
+  1. src/tools/vault.py
+
+  - Line 54: Added "unknown" to EnvVarConfig.source Literal type
+  - Lines 418-421: Added infrastructure patterns:
+    - CONSUL_PORT → fixed, "8500"
+    - VAULT_ADDR → fixed, "http://vault.service.consul:8200"
+    - VAULT_SKIP_VERIFY → fixed, "false"
+  - Lines 456-467: Added memory lookup at start of classification loop (before pattern matching)
+  - Lines 544-552: Changed default fallback from consul → unknown with "<requires input>"
+
+  2. src/memory/__init__.py
+
+  - Implemented full Mem0 integration:
+    - search_env_var_config() - lookup remembered vars globally
+    - save_env_var_config() - save single var config
+    - save_env_var_configs_batch() - save changed configs after user confirmation
+
+  3. src/main.py
+
+  - Line 22: Added import for save_env_var_configs_batch
+  - Lines 617, 631-634: Store original configs and save changed ones to memory on confirm
+  - Lines 644-650: Handle unknown source default (→ fixed)
+  - Lines 661-666: Handle <requires input> value default (→ empty)
+  - Lines 690-693: Added unknown source styling (red)
+
+
+Based on my analysis of the codebase, I can now describe the graph structure of the LanGraph application in this repository.
+
+  Graph Structure Overview
+
+  The LanGraph application implements a workflow for generating Nomad job specifications using LangGraph. The workflow is defined in src/graph.py
+  and consists of a series of interconnected nodes that process information through a state machine.
+
+  Key Components
+
+  1. State Management
+  The application defines a comprehensive AgentState class that manages all the data flowing through the graph. This includes:
+   - Input parameters (prompt, codebase path)
+   - Dockerfile information (found, selected)
+   - Analysis results (codebase analysis)
+   - Conversation history (messages, questions, user responses)
+   - Generation results (job spec, validation status)
+   - Deployment status
+   - Memory and infrastructure enrichment data
+   - Source discovery and extraction results
+   - Port configurability analysis
+
+  2. Workflow Nodes
+  The graph contains several specialized nodes that perform specific functions:
+
+   1. Source Discovery: Discovers Dockerfiles and other build artifacts
+   2. Build System Analysis: Analyzes how images are built and identifies Dockerfiles
+   3. Dockerfile Confirmation: Allows user to confirm or override Dockerfile selection
+   4. Extraction: Extracts information from discovered sources (build.yaml, Makefile, etc.)
+   5. Merge: Combines extraction results with priority
+   6. Port Analysis: Determines port configurability for Nomad dynamic port allocation
+   7. Analysis: Performs deeper codebase analysis
+   8. Enrichment: Integrates infrastructure data (Consul, Vault, Fabio)
+   9. Question Collection: Gathers user responses to clarify configuration
+   10. Generation: Creates the final Nomad HCL specification
+   11. Validation: Validates the generated HCL
+   12. Deployment: (Optional) Deploys the job to Nomad
+
+  3. Workflow Flow
+
+  The main workflow follows this sequence:
+
+   1 START → discover_sources → analyze_build_system → [confirm] → extract → merge → analyze_ports → analyze → enrich → question → collect → 
+     generate → validate
+
+  With optional deployment nodes:
+
+   1 validate → deploy → verify → [retry/failure handling]
+
+  4. Conditional Logic
+
+  The graph uses conditional edges for decision points:
+   - Dockerfile confirmation (based on build system analysis)
+   - Validation results (proceed to deployment or stop)
+   - Verification results (retry, success, or give up)
+
+  5. Interactive Features
+
+  The graph supports interactive human-in-the-loop (HitL) functionality:
+   - Interrupts at specific points (Dockerfile confirmation, question collection)
+   - State checkpointing for resuming workflows
+   - User response collection for unclear configurations
+
+  6. Deployment Integration
+
+  The workflow can include deployment steps (when enabled):
+   - Deploy to Nomad cluster
+   - Verify deployment status
+   - Retry on failures
+   - Give up on unfixable errors
+
+  This graph structure allows the application to intelligently analyze codebases, gather necessary configuration information, and generate
+  appropriate Nomad job specifications while maintaining flexibility for user interaction and error recovery.
+
+
+Good context. Let me address point 2 since that's the key architectural decision:
+
+  Partial Updates are the LangGraph Way
+
+  Currently your nodes do this:
+
+  # Current pattern (analyze.py:171-174)
+  return {
+      **state,
+      "codebase_analysis": final_analysis,
+  }
+
+  The recommended pattern with TypedDict is:
+
+  # Cleaner pattern
+  return {"codebase_analysis": final_analysis}
+
+  Why partial updates are better:
+
+  1. LangGraph merges automatically - It handles combining the partial update with existing state
+  2. Clearer intent - You see exactly what the node changes
+  3. Safer - No risk of accidentally overwriting state you didn't mean to touch
+  4. Works with reducers - The add_messages reducer only works correctly with partial updates (otherwise you'd duplicate messages)
+
+  The {**state, ...} pattern is actually a holdover from plain dict usage where you had to manage the full state yourself.
+
+  Summary of the Transition
+
+  | Change          | From                    | To                           |
+  |-----------------|-------------------------|------------------------------|
+  | State class     | class AgentState(dict): | class AgentState(TypedDict): |
+  | Graph creation  | StateGraph(dict)        | StateGraph(AgentState)       |
+  | Node returns    | {**state, "field": val} | {"field": val}               |
+  | Optional fields | Just annotations        | NotRequired[type]            |
+
+  The node signature change (dict[str, Any] → AgentState) is optional but recommended for full type safety.
+
+  Effort Estimate
+
+  - graph.py: Update AgentState class and StateGraph() call
+  - Each node file: Remove **state, from return statements
+  - Add NotRequired imports where needed
+
+  It's a straightforward refactor - mostly removing code (**state,) rather than adding it.
+
+  Want me to proceed with this refactor, or do you have other questions first?
+
