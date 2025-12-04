@@ -175,7 +175,7 @@ class TestCreateWorkflow:
 
         # Get node names from the workflow
         nodes = workflow.nodes
-        assert "analyze" in nodes
+        assert "analysis" in nodes  # Analysis subgraph
         assert "question" in nodes
         assert "collect" in nodes
         assert "generate" in nodes

@@ -8,9 +8,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 
-from src.nodes.analyze import create_analyze_node
 from src.nodes.analyze_build_system import create_analyze_build_system_node
-from src.nodes.analyze_ports import create_analyze_ports_node
 from src.nodes.confirm_dockerfile import (
     create_confirm_node,
     should_confirm_dockerfile,
@@ -19,10 +17,10 @@ from src.nodes.discover_sources import create_discover_sources_node
 from src.nodes.extract import create_extract_node
 from src.nodes.merge import create_merge_node
 from src.nodes.generate import create_generate_node, create_fix_node
-from src.nodes.enrich import create_enrich_node
 from src.nodes.validate import create_validate_node, should_proceed_after_validation
 from src.nodes.question import create_question_node, create_collect_node
 from src.nodes.deploy import create_deploy_node, create_verify_node
+from src.subgraphs.analysis import create_analysis_subgraph_node
 from config.settings import Settings, get_settings
 
 
@@ -234,9 +232,8 @@ def create_workflow(
     analyze_build_system_node = create_analyze_build_system_node(llm)
     extract_node = create_extract_node()
     merge_node = create_merge_node()
-    analyze_ports_node = create_analyze_ports_node(llm)
-    analyze_node = create_analyze_node(llm)
-    enrich_node = create_enrich_node(settings)
+    # Analysis subgraph replaces: analyze_ports, analyze, enrich
+    analysis_node = create_analysis_subgraph_node(llm, settings)
     question_node = create_question_node()
     collect_node = create_collect_node()
     generate_node = create_generate_node(llm)
@@ -252,17 +249,17 @@ def create_workflow(
     workflow.add_node("confirm", confirm_node)
     workflow.add_node("extract", extract_node)
     workflow.add_node("merge", merge_node)
-    workflow.add_node("analyze_ports", analyze_ports_node)
-    workflow.add_node("analyze", analyze_node)
-    workflow.add_node("enrich", enrich_node)
+    # Analysis subgraph (encapsulates: analyze_ports -> analyze -> enrich)
+    workflow.add_node("analysis", analysis_node)
     workflow.add_node("question", question_node)
     workflow.add_node("collect", collect_node)
     workflow.add_node("generate", generate_node)
     workflow.add_node("validate", validate_node)
 
-    # Flow: discover_sources -> analyze_build_system -> [confirm] -> extract -> merge -> analyze -> enrich -> question -> collect -> generate -> validate
-    # The new flow has build system analysis BEFORE Dockerfile confirmation, so the LLM
+    # Flow: discover_sources -> analyze_build_system -> [confirm] -> extract -> merge -> analysis -> question -> collect -> generate -> validate
+    # The build system analysis runs BEFORE Dockerfile confirmation, so the LLM
     # identifies which Dockerfile is actually used, and the user confirms that finding.
+    # The analysis subgraph encapsulates: analyze_ports -> analyze -> enrich
     workflow.add_edge(START, "discover_sources")
     workflow.add_edge("discover_sources", "analyze_build_system")
 
@@ -278,10 +275,8 @@ def create_workflow(
     workflow.add_edge("confirm", "extract")
 
     workflow.add_edge("extract", "merge")
-    workflow.add_edge("merge", "analyze_ports")
-    workflow.add_edge("analyze_ports", "analyze")
-    workflow.add_edge("analyze", "enrich")
-    workflow.add_edge("enrich", "question")
+    workflow.add_edge("merge", "analysis")  # Analysis subgraph
+    workflow.add_edge("analysis", "question")
     workflow.add_edge("question", "collect")
     workflow.add_edge("collect", "generate")
     workflow.add_edge("generate", "validate")

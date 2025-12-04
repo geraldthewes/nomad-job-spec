@@ -68,7 +68,25 @@ def mock_llm():
         """Return mock responses based on message content."""
         content = str(messages[-1].content) if messages else ""
 
-        if "analyze" in content.lower() or "codebase" in content.lower():
+        if "port" in content.lower() and "listening" in content.lower():
+            # Port analysis response (analyze_ports node)
+            return AIMessage(content="""{
+                "type": "env_var",
+                "value": "PORT",
+                "default_port": 3000,
+                "evidence": "server.js:5 - const PORT = process.env.PORT || 3000"
+            }""")
+
+        elif "build" in content.lower() and "docker" in content.lower():
+            # Build system analysis response
+            return AIMessage(content="""{
+                "mechanism": "docker",
+                "config_path": "Dockerfile",
+                "dockerfile_used": "Dockerfile",
+                "reasoning": "Direct docker build detected"
+            }""")
+
+        elif "analyze" in content.lower() or "codebase" in content.lower():
             return AIMessage(content="""{
                 "summary": "A simple web application",
                 "service_type": "MEDIUM",
