@@ -11,6 +11,7 @@ from src.tools.codebase import (
     analyze_codebase,
     DockerfileInfo,
     DependencyInfo,
+    _parse_env_line,
 )
 
 
@@ -73,6 +74,125 @@ CMD ["--config", "/etc/app.conf"]
 
         assert result.entrypoint == '["./start.sh"]'
         assert result.cmd == '["--config", "/etc/app.conf"]'
+
+    def test_parse_multi_env_single_line(self, tmp_path):
+        """Test parsing multiple ENV vars on single line."""
+        dockerfile = tmp_path / "Dockerfile"
+        dockerfile.write_text("""FROM python:3.11
+ENV VAR1=value1 VAR2=value2 VAR3=value3
+""")
+
+        result = parse_dockerfile(str(dockerfile))
+
+        assert "VAR1" in result.env_var_names
+        assert "VAR2" in result.env_var_names
+        assert "VAR3" in result.env_var_names
+        assert result.env_vars.get("VAR1") == "value1"
+        assert result.env_vars.get("VAR2") == "value2"
+        assert result.env_vars.get("VAR3") == "value3"
+
+    def test_parse_env_without_value(self, tmp_path):
+        """Test parsing ENV without default value."""
+        dockerfile = tmp_path / "Dockerfile"
+        dockerfile.write_text("""FROM python:3.11
+ENV MY_VAR
+ENV ANOTHER_VAR
+""")
+
+        result = parse_dockerfile(str(dockerfile))
+
+        assert "MY_VAR" in result.env_var_names
+        assert "ANOTHER_VAR" in result.env_var_names
+        # Variables without values should not be in env_vars dict
+        assert "MY_VAR" not in result.env_vars
+        assert "ANOTHER_VAR" not in result.env_vars
+
+    def test_parse_env_legacy_format(self, tmp_path):
+        """Test parsing legacy ENV format (space separated)."""
+        dockerfile = tmp_path / "Dockerfile"
+        dockerfile.write_text("""FROM python:3.11
+ENV LOG_LEVEL info
+ENV DEBUG false
+""")
+
+        result = parse_dockerfile(str(dockerfile))
+
+        assert "LOG_LEVEL" in result.env_var_names
+        assert "DEBUG" in result.env_var_names
+        assert result.env_vars.get("LOG_LEVEL") == "info"
+        assert result.env_vars.get("DEBUG") == "false"
+
+    def test_parse_env_quoted_values(self, tmp_path):
+        """Test parsing ENV with quoted values."""
+        dockerfile = tmp_path / "Dockerfile"
+        dockerfile.write_text('''FROM python:3.11
+ENV MSG="Hello World"
+ENV PATH_VAR='some/path'
+''')
+
+        result = parse_dockerfile(str(dockerfile))
+
+        assert result.env_vars.get("MSG") == "Hello World"
+        assert result.env_vars.get("PATH_VAR") == "some/path"
+
+    def test_env_var_names_list(self, tmp_path):
+        """Test that env_var_names contains all declared vars."""
+        dockerfile = tmp_path / "Dockerfile"
+        dockerfile.write_text("""FROM python:3.11
+ENV LOG_LEVEL=info
+ENV DEBUG=false
+ENV SECRET
+ENV API_KEY=abc123
+""")
+
+        result = parse_dockerfile(str(dockerfile))
+
+        assert len(result.env_var_names) == 4
+        assert "LOG_LEVEL" in result.env_var_names
+        assert "DEBUG" in result.env_var_names
+        assert "SECRET" in result.env_var_names
+        assert "API_KEY" in result.env_var_names
+
+
+class TestParseEnvLine:
+    """Tests for _parse_env_line helper function."""
+
+    def test_single_var_with_value(self):
+        """Test parsing single var with value."""
+        result = _parse_env_line("VAR=value")
+        assert result == [("VAR", "value")]
+
+    def test_single_var_no_value(self):
+        """Test parsing single var without value."""
+        result = _parse_env_line("VAR")
+        assert result == [("VAR", None)]
+
+    def test_multiple_vars(self):
+        """Test parsing multiple vars on one line."""
+        result = _parse_env_line("VAR1=val1 VAR2=val2 VAR3=val3")
+        assert ("VAR1", "val1") in result
+        assert ("VAR2", "val2") in result
+        assert ("VAR3", "val3") in result
+
+    def test_legacy_format(self):
+        """Test parsing legacy space-separated format."""
+        result = _parse_env_line("LOG_LEVEL info")
+        assert result == [("LOG_LEVEL", "info")]
+
+    def test_quoted_value_double(self):
+        """Test parsing double-quoted value."""
+        result = _parse_env_line('MSG="Hello World"')
+        assert result == [("MSG", "Hello World")]
+
+    def test_quoted_value_single(self):
+        """Test parsing single-quoted value."""
+        result = _parse_env_line("MSG='Hello World'")
+        assert result == [("MSG", "Hello World")]
+
+    def test_empty_value(self):
+        """Test parsing empty value."""
+        result = _parse_env_line("VAR=")
+        assert result == [("VAR", "")]
 
 
 class TestDetectLanguageAndDeps:

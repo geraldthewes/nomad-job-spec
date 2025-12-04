@@ -214,39 +214,87 @@ def create_enrich_node(
                     span.end(output={"status": "no_conventions"})
 
         # 3. Generate multi-source env var configurations
-        env_vars = analysis.get("env_vars_required", [])
+        # Check if env_deploy_config is available (from extract_env_vars node)
+        env_deploy_config = state.get("env_deploy_config", {})
         env_var_configs: list[dict] = []
 
-        with obs.span("suggest_env_configs", input={"env_vars": env_vars, "count": len(env_vars)}) as span:
-            if env_vars:
-                try:
-                    # Use new multi-source suggestion logic
-                    configs = suggest_env_configs(env_vars, app_name, vault)
-                    env_var_configs = [cfg.to_dict() for cfg in configs]
-                    fixed_count = sum(1 for c in configs if c.source == "fixed")
-                    consul_count = sum(1 for c in configs if c.source == "consul")
-                    vault_count = sum(1 for c in configs if c.source == "vault")
-                    logger.info(
-                        f"Generated {len(env_var_configs)} env var configs "
-                        f"(fixed: {fixed_count}, consul: {consul_count}, vault: {vault_count})"
-                    )
-                    span.end(output={
-                        "total": len(env_var_configs),
-                        "fixed": fixed_count,
-                        "consul": consul_count,
-                        "vault": vault_count,
-                    })
-                except Exception as e:
-                    logger.warning(f"Failed to suggest env var configs: {e}")
-                    span.end(level="WARNING", status_message=str(e))
-            else:
-                span.end(output={"total": 0, "reason": "no_env_vars"})
-
-        # Apply port env var mapping from port_analysis (single app listening port)
-        # Only the app's listening port env var should use Nomad's dynamic port
+        # Get port analysis for nomad port mapping (needed in both paths)
         port_analysis = state.get("port_analysis", {})
         port_env_mapping = port_analysis.get("recommended_env_mapping", {})
-        if port_env_mapping:
+
+        with obs.span("process_env_configs") as span:
+            if env_deploy_config and env_deploy_config.get("entries"):
+                # Use env_deploy_config (new explicit configuration)
+                entries = env_deploy_config.get("entries", {})
+                for name, entry in entries.items():
+                    config = {
+                        "name": name,
+                        "source": entry.get("source", "env"),
+                        "value": entry.get("value", ""),
+                        "confidence": 1.0,  # Explicit config = full confidence
+                    }
+                    # For vault entries, include parsed path and field
+                    if entry.get("source") == "vault":
+                        config["vault_path"] = entry.get("vault_path")
+                        config["vault_field"] = entry.get("vault_field")
+                    # For nomad entries with "assigned" value, use port analysis mapping
+                    elif entry.get("source") == "nomad" and entry.get("value") == "assigned":
+                        nomad_value = port_env_mapping.get(name)
+                        if nomad_value:
+                            config["value"] = nomad_value
+                            logger.debug(f"Applied port mapping for {name}: {nomad_value}")
+                        else:
+                            # Default to generic NOMAD_PORT_http if no mapping found
+                            config["value"] = "${NOMAD_PORT_http}"
+                            logger.debug(f"No port mapping for {name}, using default: ${{NOMAD_PORT_http}}")
+                    env_var_configs.append(config)
+
+                env_count = sum(1 for e in entries.values() if e.get("source") == "env")
+                vault_count = sum(1 for e in entries.values() if e.get("source") == "vault")
+                nomad_count = sum(1 for e in entries.values() if e.get("source") == "nomad")
+                logger.info(
+                    f"Using {len(env_var_configs)} env var configs from .env.deploy "
+                    f"(env: {env_count}, vault: {vault_count}, nomad: {nomad_count})"
+                )
+                span.end(output={
+                    "source": "env_deploy",
+                    "total": len(env_var_configs),
+                    "env": env_count,
+                    "vault": vault_count,
+                    "nomad": nomad_count,
+                })
+            else:
+                # Fallback to inference (legacy behavior for projects without .env.deploy)
+                env_vars = analysis.get("env_vars_required", [])
+                if env_vars:
+                    try:
+                        configs = suggest_env_configs(env_vars, app_name, vault)
+                        env_var_configs = [cfg.to_dict() for cfg in configs]
+                        fixed_count = sum(1 for c in configs if c.source == "fixed")
+                        consul_count = sum(1 for c in configs if c.source == "consul")
+                        vault_count = sum(1 for c in configs if c.source == "vault")
+                        logger.info(
+                            f"Generated {len(env_var_configs)} env var configs via inference "
+                            f"(fixed: {fixed_count}, consul: {consul_count}, vault: {vault_count})"
+                        )
+                        span.end(output={
+                            "source": "inference",
+                            "total": len(env_var_configs),
+                            "fixed": fixed_count,
+                            "consul": consul_count,
+                            "vault": vault_count,
+                        })
+                    except Exception as e:
+                        logger.warning(f"Failed to suggest env var configs: {e}")
+                        span.end(level="WARNING", status_message=str(e))
+                else:
+                    span.end(output={"source": "none", "total": 0, "reason": "no_env_vars"})
+
+        # Apply port env var mapping from port_analysis (single app listening port)
+        # Only apply if not using env_deploy_config (which has explicit nomad: entries)
+        # When using env_deploy_config, nomad ports are already handled above
+        if port_env_mapping and not env_deploy_config.get("entries"):
+            # Only apply inference-based port mapping if not using explicit .env.deploy
             with obs.span("apply_port_env_mapping", input={"mapping": list(port_env_mapping.keys())}) as span:
                 for env_var, nomad_ref in port_env_mapping.items():
                     # Find existing config for this env var and update it
@@ -270,10 +318,12 @@ def create_enrich_node(
                 span.end(output={"env_var": env_var, "mapping": nomad_ref})
 
         # Also maintain legacy vault_suggestions for backward compatibility
-        with obs.span("suggest_vault_mappings", input={"env_vars_count": len(env_vars)}) as span:
-            if env_vars and vault is not None:
+        # Skip when using env_deploy_config as vault entries are already explicit
+        legacy_env_vars = analysis.get("env_vars_required", []) if not env_deploy_config.get("entries") else []
+        with obs.span("suggest_vault_mappings", input={"env_vars_count": len(legacy_env_vars)}) as span:
+            if legacy_env_vars and vault is not None:
                 try:
-                    suggestions = vault.suggest_mappings(env_vars, app_name)
+                    suggestions = vault.suggest_mappings(legacy_env_vars, app_name)
                     vault_suggestions["suggestions"] = [
                         {
                             "env_var": s.env_var,
@@ -291,7 +341,8 @@ def create_enrich_node(
                     vault_suggestions["error"] = str(e)
                     span.end(level="WARNING", status_message=str(e))
             else:
-                span.end(output={"skipped": True, "reason": "no_env_vars_or_vault"})
+                reason = "using_env_deploy" if env_deploy_config.get("entries") else "no_env_vars_or_vault"
+                span.end(output={"skipped": True, "reason": reason})
 
         # 4. Check Consul for service dependencies
         with obs.span("query_consul_services") as span:

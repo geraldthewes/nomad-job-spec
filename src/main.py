@@ -713,17 +713,29 @@ def _display_env_config_table(configs: list[dict]):
         confidence = cfg.get("confidence", 0)
 
         # Source styling
-        if source == "fixed":
+        # .env.deploy sources: env, vault, nomad
+        # Inference sources: fixed, consul, vault, unknown
+        if source == "env":
+            source_str = "[blue]conf[/blue]"
+        elif source == "nomad":
+            source_str = "[cyan]nomad[/cyan]"
+        elif source == "fixed":
             source_str = "[blue]fixed[/blue]"
         elif source == "consul":
             source_str = "[yellow]consul[/yellow]"
         elif source == "vault":
             source_str = "[magenta]vault[/magenta]"
-        else:  # unknown
+        elif source == "unknown":
             source_str = "[red]unknown[/red]"
+        else:
+            # Any unrecognized source type
+            source_str = f"[dim]{source}[/dim]"
 
         # Confidence styling
-        if confidence >= 0.9:
+        if source == "nomad":
+            # Nomad ports are predictions from port_analysis
+            conf_str = "[cyan]predicted[/cyan]"
+        elif confidence >= 0.9:
             conf_str = "[green]validated[/green]"
         elif confidence >= 0.5:
             conf_str = f"[yellow]{int(confidence * 100)}%[/yellow]"

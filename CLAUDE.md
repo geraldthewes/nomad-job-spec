@@ -210,6 +210,58 @@ Implement using LangChain's `@tool` decorator:
 
 All tool calls traced via LangFuse.
 
+## Environment Variable Configuration
+
+The analysis subgraph extracts environment variables using a two-source approach:
+
+### Authoritative Source: Dockerfile ENV
+
+The Dockerfile's `ENV` declarations are the authoritative source of required environment variables. All ENV formats are supported:
+- `ENV VAR=value`
+- `ENV VAR value`
+- `ENV VAR1=val1 VAR2=val2` (multi-value)
+- `ENV VAR` (no default)
+
+### Configuration Source: deploy/.env.deploy
+
+Target repositories should include a `deploy/.env.deploy` file that explicitly defines how each environment variable is sourced:
+
+```bash
+# Format: <type>:<VAR_NAME>=<value>
+
+# Fixed environment values
+env:LOG_LEVEL=info
+env:NODE_ENV=production
+
+# Vault secrets (path:field format)
+vault:DB_PASSWORD=secret/data/myapp/db:password
+vault:API_KEY=secret/data/myapp/api:key
+
+# Nomad-assigned dynamic ports
+nomad:APP_PORT=assigned
+```
+
+**Entry Types:**
+- `env:VAR=value` - Static environment value, rendered directly in HCL
+- `vault:VAR=path:field` - Vault secret reference, generates Vault template stanza
+- `nomad:VAR=assigned` - Nomad dynamic port, maps to `NOMAD_PORT_<label>`
+
+### Validation
+
+The `extract_env_vars` node validates:
+1. **Coverage**: All Dockerfile ENV vars must have entries in `.env.deploy`
+2. **Vault paths**: If Vault is available, validates paths and fields exist
+3. **Format**: Entries must have valid type prefixes
+
+### Backward Compatibility
+
+When `deploy/.env.deploy` is missing, the system falls back to inference-based configuration using `suggest_env_configs()` in `src/tools/vault.py`. This maintains compatibility with repositories that haven't adopted the explicit format.
+
+**Key Files:**
+- `src/tools/env_deploy.py` - Parser and validation logic
+- `src/subgraphs/analysis/extract_env_vars.py` - Analysis node
+- `src/subgraphs/analysis/enrich.py` - Uses config or falls back to inference
+
 ## Entry Point
 
 CLI command structure:

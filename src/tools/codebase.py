@@ -26,6 +26,7 @@ class DockerfileInfo:
     cmd: str | None = None
     entrypoint: str | None = None
     env_vars: dict[str, str] = field(default_factory=dict)
+    env_var_names: list[str] = field(default_factory=list)  # All ENV var names (for validation)
     workdir: str | None = None
     healthcheck: str | None = None
 
@@ -63,6 +64,7 @@ class CodebaseAnalysis:
                 "cmd": self.dockerfile.cmd,
                 "entrypoint": self.dockerfile.entrypoint,
                 "env_vars": self.dockerfile.env_vars,
+                "env_var_names": self.dockerfile.env_var_names,
                 "workdir": self.dockerfile.workdir,
                 "healthcheck": self.dockerfile.healthcheck,
             }
@@ -108,6 +110,60 @@ def clone_repository(repo_url: str, target_dir: str | None = None) -> str:
     return target_dir
 
 
+def _parse_env_line(env_line: str) -> list[tuple[str, str | None]]:
+    """Parse a single ENV line from a Dockerfile.
+
+    Handles multiple formats:
+    - ENV VAR=value
+    - ENV VAR value (legacy format, single variable only)
+    - ENV VAR1=val1 VAR2=val2 (multiple variables)
+    - ENV VAR (no value)
+
+    Args:
+        env_line: The content after "ENV " in a Dockerfile line.
+
+    Returns:
+        List of (var_name, value) tuples. Value is None if not specified.
+    """
+    result: list[tuple[str, str | None]] = []
+    env_line = env_line.strip()
+
+    # Check if line contains any = signs (modern format)
+    if "=" in env_line:
+        # Modern format: VAR=value or VAR1=val1 VAR2=val2
+        # Use regex to find VAR=value patterns, handling quoted values
+        # Pattern: VARNAME=value where value can be quoted or unquoted
+        pattern = r'(\w+)=(?:"([^"]*)"|\'([^\']*)\'|(\S*))'
+        matches = re.findall(pattern, env_line)
+        for match in matches:
+            var_name = match[0]
+            # Value is in one of the capture groups (double-quoted, single-quoted, or unquoted)
+            value = match[1] or match[2] or match[3]
+            result.append((var_name, value if value else ""))
+
+        # Also check for VAR= (no value) patterns
+        no_value_pattern = r'(\w+)=(?=\s|$)'
+        no_value_matches = re.findall(no_value_pattern, env_line)
+        existing_vars = {r[0] for r in result}
+        for var_name in no_value_matches:
+            if var_name not in existing_vars:
+                result.append((var_name, ""))
+    else:
+        # Legacy format: ENV VAR value or ENV VAR (no value)
+        parts = env_line.split(None, 1)  # Split on first whitespace
+        if parts:
+            var_name = parts[0]
+            if len(parts) > 1:
+                # Has a value
+                value = parts[1].strip().strip('"').strip("'")
+                result.append((var_name, value))
+            else:
+                # No value
+                result.append((var_name, None))
+
+    return result
+
+
 def parse_dockerfile(dockerfile_path: str) -> DockerfileInfo:
     """Parse a Dockerfile to extract deployment-relevant information.
 
@@ -147,12 +203,19 @@ def parse_dockerfile(dockerfile_path: str) -> DockerfileInfo:
     if entrypoint_match:
         info.entrypoint = entrypoint_match.group(1).strip()
 
-    # Parse ENV instructions
-    env_matches = re.findall(
-        r"^ENV\s+(\w+)(?:=|\s+)(.+?)$", content, re.MULTILINE | re.IGNORECASE
-    )
-    for key, value in env_matches:
-        info.env_vars[key] = value.strip().strip('"').strip("'")
+    # Parse ENV instructions - handles multiple formats:
+    # ENV VAR=value, ENV VAR value, ENV VAR1=val1 VAR2=val2, ENV VAR (no value)
+    env_var_names: list[str] = []
+    env_lines = re.findall(r"^ENV\s+(.+?)$", content, re.MULTILINE | re.IGNORECASE)
+    for env_line in env_lines:
+        # Handle multi-variable ENV lines (ENV VAR1=val1 VAR2=val2)
+        # and single variable lines (ENV VAR=value or ENV VAR value)
+        parsed = _parse_env_line(env_line)
+        for var_name, var_value in parsed:
+            env_var_names.append(var_name)
+            if var_value is not None:
+                info.env_vars[var_name] = var_value
+    info.env_var_names = env_var_names
 
     # Parse WORKDIR instruction
     workdir_match = re.search(r"^WORKDIR\s+(\S+)", content, re.MULTILINE | re.IGNORECASE)

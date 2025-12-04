@@ -23,6 +23,7 @@ from .analyze_ports import create_analyze_ports_node
 from .classify_workload import create_classify_workload_node
 from .detect_gpu import create_detect_gpu_node
 from .enrich import create_enrich_node
+from .extract_env_vars import create_extract_env_vars_node
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,9 @@ class AnalysisState(TypedDict, total=False):
 
     # Outputs (returned to parent workflow)
     app_name: str
-    env_var_configs: list[dict[str, Any]]
+    env_deploy_config: dict[str, Any]  # Parsed deploy/.env.deploy configuration
+    env_var_validation: dict[str, Any]  # Validation results for env vars
+    env_var_configs: list[dict[str, Any]]  # Legacy: multi-source env configs (for backward compat)
     vault_suggestions: dict[str, Any]
     consul_conventions: dict[str, Any]
     consul_services: dict[str, Any]
@@ -103,6 +106,7 @@ def create_analysis_subgraph(
     detect_gpu_node = create_detect_gpu_node(llm)
     analyze_ports_node = create_analyze_ports_node(llm)
     analyze_node = create_analyze_node(llm)
+    extract_env_vars_node = create_extract_env_vars_node()
     enrich_node = create_enrich_node(settings)
 
     # Build subgraph
@@ -112,14 +116,16 @@ def create_analysis_subgraph(
     workflow.add_node("detect_gpu", detect_gpu_node)
     workflow.add_node("analyze_ports", analyze_ports_node)
     workflow.add_node("analyze", analyze_node)
+    workflow.add_node("extract_env_vars", extract_env_vars_node)
     workflow.add_node("enrich", enrich_node)
 
-    # Linear flow: classify_workload -> detect_gpu -> analyze_ports -> analyze -> enrich
+    # Linear flow: classify_workload -> detect_gpu -> analyze_ports -> analyze -> extract_env_vars -> enrich
     workflow.add_edge(START, "classify_workload")
     workflow.add_edge("classify_workload", "detect_gpu")
     workflow.add_edge("detect_gpu", "analyze_ports")
     workflow.add_edge("analyze_ports", "analyze")
-    workflow.add_edge("analyze", "enrich")
+    workflow.add_edge("analyze", "extract_env_vars")
+    workflow.add_edge("extract_env_vars", "enrich")
     workflow.add_edge("enrich", END)
 
     return workflow
@@ -182,6 +188,8 @@ def create_analysis_subgraph_node(
             "port_analysis": result.get("port_analysis", {}),
             "codebase_analysis": result.get("codebase_analysis", {}),
             "app_name": result.get("app_name", ""),
+            "env_deploy_config": result.get("env_deploy_config", {}),
+            "env_var_validation": result.get("env_var_validation", {}),
             "env_var_configs": result.get("env_var_configs", []),
             "vault_suggestions": result.get("vault_suggestions", {}),
             "consul_conventions": result.get("consul_conventions", {}),

@@ -96,6 +96,7 @@ class JobConfig:
     ports: list[PortConfig] = field(default_factory=list)
     env_vars: dict[str, str] = field(default_factory=dict)
     consul_vars: dict[str, str] = field(default_factory=dict)  # env_var -> consul_kv_path
+    nomad_port_vars: dict[str, str] = field(default_factory=dict)  # env_var -> port_label (for NOMAD_PORT_*)
     dns_servers: list[str] = field(default_factory=list)
 
     # Architecture constraint
@@ -401,8 +402,8 @@ def _build_task_block(config: JobConfig) -> str:
     if config.consul_vars:
         parts.append(_build_consul_templates(config.consul_vars))
 
-    # Environment variables (fixed values)
-    if config.env_vars:
+    # Environment variables (fixed values and nomad port mappings)
+    if config.env_vars or config.nomad_port_vars:
         parts.append(_build_env_block(config))
 
     # Service registration (skip for batch jobs)
@@ -561,13 +562,28 @@ EOH
 
 
 def _build_env_block(config: JobConfig) -> str:
-    """Build the environment variables block."""
+    """Build the environment variables block.
+
+    Handles three types of env vars:
+    - Fixed values from config.env_vars
+    - Nomad dynamic ports from config.nomad_port_vars
+    """
     env_lines = []
+
+    # Fixed env vars
     for key, value in config.env_vars.items():
         # Escape Nomad runtime variables
         if value.startswith("${NOMAD_"):
             value = value.replace("${", "$${")
         env_lines.append(f'        {key} = "{value}"')
+
+    # Nomad port env vars (env_var -> port_label)
+    for env_var, port_label in config.nomad_port_vars.items():
+        # Use $$ to escape the Nomad runtime variable
+        env_lines.append(f'        {env_var} = "${{NOMAD_PORT_{port_label}}}"')
+
+    if not env_lines:
+        return ""
 
     return f'''
       env {{
@@ -840,6 +856,8 @@ def merge_hcl_configs(base_config: JobConfig, overrides: dict[str, Any]) -> JobC
         "network_mode": base_config.network_mode,
         "ports": list(base_config.ports),
         "env_vars": dict(base_config.env_vars),
+        "consul_vars": dict(base_config.consul_vars),
+        "nomad_port_vars": dict(base_config.nomad_port_vars),
         "dns_servers": list(base_config.dns_servers),
         "require_amd64": base_config.require_amd64,
         "node_constraint": base_config.node_constraint,
