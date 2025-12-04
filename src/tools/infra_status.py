@@ -557,6 +557,74 @@ def check_langfuse_health(
         )
 
 
+def check_qdrant_health(
+    host: str | None = None,
+    port: int | None = None,
+    memory_enabled: bool = True,
+    timeout: float = 5.0,
+) -> InfraStatus:
+    """Check Qdrant vector database health.
+
+    Args:
+        host: Qdrant server host. Defaults to localhost.
+        port: Qdrant server port. Defaults to 6333.
+        memory_enabled: Whether memory features are enabled.
+        timeout: Connection timeout in seconds.
+
+    Returns:
+        InfraStatus with availability and any error details.
+    """
+    host = host or "localhost"
+    port = port or 6333
+    addr = f"{host}:{port}"
+
+    # If memory is disabled, report as disabled (not an error)
+    if not memory_enabled:
+        return InfraStatus(
+            service="Qdrant",
+            available=False,
+            address=addr,
+            error="Disabled",
+            suggestion="Set MEMORY_ENABLED=true to enable memory features",
+        )
+
+    try:
+        # Check the health endpoint
+        health_url = f"http://{addr}/healthz"
+
+        with httpx.Client(timeout=timeout) as client:
+            response = client.get(health_url)
+            response.raise_for_status()
+
+        return InfraStatus(
+            service="Qdrant",
+            available=True,
+            address=addr,
+        )
+
+    except httpx.HTTPStatusError as e:
+        error_msg, suggestion = _parse_http_error(e.response.status_code, "qdrant", addr)
+        logger.debug(f"Qdrant health check failed: {e}")
+        return InfraStatus(
+            service="Qdrant",
+            available=False,
+            address=addr,
+            error=error_msg,
+            suggestion=suggestion,
+        )
+
+    except Exception as e:
+        error_msg, suggestion = _parse_connection_error(e, "qdrant", addr)
+        logger.debug(f"Qdrant health check failed: {e}")
+        return InfraStatus(
+            service="Qdrant",
+            available=False,
+            address=addr,
+            error=error_msg,
+            suggestion=suggestion,
+        )
+
+
 def check_all_infrastructure(
     nomad_addr: str | None = None,
     nomad_token: str | None = None,
@@ -569,6 +637,9 @@ def check_all_infrastructure(
     langfuse_public_key: str | None = None,
     langfuse_secret_key: str | None = None,
     langfuse_base_url: str | None = None,
+    qdrant_host: str | None = None,
+    qdrant_port: int | None = None,
+    memory_enabled: bool = True,
     timeout: float = 5.0,
 ) -> InfraHealthReport:
     """Check health of all infrastructure services.
@@ -585,6 +656,9 @@ def check_all_infrastructure(
         langfuse_public_key: LangFuse public key.
         langfuse_secret_key: LangFuse secret key.
         langfuse_base_url: LangFuse base URL.
+        qdrant_host: Qdrant server host.
+        qdrant_port: Qdrant server port.
+        memory_enabled: Whether memory features are enabled.
         timeout: Connection timeout in seconds.
 
     Returns:
@@ -599,6 +673,9 @@ def check_all_infrastructure(
     report.statuses.append(check_vault_health(vault_addr, vault_token, timeout))
     report.statuses.append(check_langfuse_health(
         langfuse_enabled, langfuse_public_key, langfuse_secret_key, langfuse_base_url
+    ))
+    report.statuses.append(check_qdrant_health(
+        qdrant_host, qdrant_port, memory_enabled, timeout
     ))
 
     return report
@@ -625,4 +702,7 @@ def check_infrastructure_from_settings(settings) -> InfraHealthReport:
         langfuse_public_key=settings.langfuse_public_key,
         langfuse_secret_key=settings.langfuse_secret_key,
         langfuse_base_url=settings.langfuse_base_url,
+        qdrant_host=settings.qdrant_host,
+        qdrant_port=settings.qdrant_port,
+        memory_enabled=settings.memory_enabled,
     )

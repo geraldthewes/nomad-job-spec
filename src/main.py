@@ -19,7 +19,7 @@ from langgraph.types import Command
 from config.settings import get_settings
 from src.llm.provider import get_llm
 from src.graph import compile_graph, create_initial_state
-from src.memory import save_env_var_configs_batch
+from src.memory import save_env_var_configs_batch, BatchSaveResult
 from src.observability import get_observability
 from src.tools.infra_status import InfraHealthReport, check_infrastructure_from_settings
 
@@ -629,9 +629,27 @@ def _collect_env_config_responses(
 
         if choice == "confirm":
             # Save user choices to memory for future runs
-            saved = save_env_var_configs_batch(current_configs, original_configs)
-            if saved > 0:
-                console.print(f"[dim]Saved {saved} env var config(s) to memory for future use.[/dim]")
+            result = save_env_var_configs_batch(current_configs, original_configs)
+
+            if result.disabled:
+                # Memory disabled - no message needed
+                pass
+            elif result.failed > 0 and result.saved == 0:
+                console.print(
+                    "[yellow]Warning:[/yellow] Could not save to memory "
+                    "(Qdrant unavailable). Your choices will not be remembered."
+                )
+            elif result.failed > 0:
+                console.print(
+                    f"[dim]Saved {result.saved} env var config(s) to memory. "
+                    f"{result.failed} failed to save.[/dim]"
+                )
+            elif result.saved > 0:
+                console.print(
+                    f"[dim]Saved {result.saved} env var config(s) to memory for future use.[/dim]"
+                )
+            # If saved == 0 and failed == 0 and not disabled, nothing changed - no message needed
+
             return current_configs
 
         # Edit mode: step through each variable
