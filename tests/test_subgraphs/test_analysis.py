@@ -93,7 +93,7 @@ class TestCreateAnalysisSubgraphNode:
             "deployment_status": "pending",  # Should be ignored
         }
 
-        with patch("src.subgraphs.analysis.get_settings", return_value=mock_settings):
+        with patch("src.subgraphs.analysis.graph.get_settings", return_value=mock_settings):
             result = node(agent_state)
 
         # Verify output fields are returned
@@ -113,7 +113,7 @@ class TestCreateAnalysisSubgraphNode:
             "merged_extraction": {},
         }
 
-        with patch("src.subgraphs.analysis.get_settings", return_value=mock_settings):
+        with patch("src.subgraphs.analysis.graph.get_settings", return_value=mock_settings):
             result = node(agent_state)
 
         # Check all expected output fields

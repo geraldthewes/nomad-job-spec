@@ -16,9 +16,9 @@ from langgraph.graph import StateGraph, START, END
 from langchain_core.language_models import BaseChatModel
 
 from config.settings import Settings, get_settings
-from src.nodes.analyze import create_analyze_node
-from src.nodes.analyze_ports import create_analyze_ports_node
-from src.nodes.enrich import create_enrich_node
+from .analyze import create_analyze_node
+from .analyze_ports import create_analyze_ports_node
+from .enrich import create_enrich_node
 
 logger = logging.getLogger(__name__)
 

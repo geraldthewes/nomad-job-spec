@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.nodes.analyze import (
+from src.subgraphs.analysis.analyze import (
     analyze_codebase_node,
     create_analyze_node,
     _merge_analyses,
