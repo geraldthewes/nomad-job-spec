@@ -116,24 +116,18 @@ def analyze_codebase_node(
         Updated state with 'codebase_analysis' field.
     """
     obs = get_observability()
-    trace = obs.create_trace(
-        name="analyze_node",
-        input={"codebase_path": state.get("codebase_path")},
-    )
 
     codebase_path = state.get("codebase_path")
     selected_dockerfile = state.get("selected_dockerfile")
 
     if not codebase_path:
-        if trace:
-            trace.update(level="ERROR", status_message="No codebase path provided")
+        logger.error("No codebase path provided")
         return {
-            **state,
             "codebase_analysis": {"error": "No codebase path provided"},
         }
 
-    # Step 1: Static analysis - pass span so tool creates child spans under it
-    with obs.span("static_analysis", trace=trace, input={"path": codebase_path, "selected_dockerfile": selected_dockerfile}) as span:
+    # Step 1: Static analysis
+    with obs.span("static_analysis", input={"path": codebase_path, "selected_dockerfile": selected_dockerfile}) as span:
         try:
             static_analysis: CodebaseAnalysis = analyze_codebase_tool(
                 codebase_path,
@@ -148,17 +142,14 @@ def analyze_codebase_node(
             })
         except Exception as e:
             span.end(level="ERROR", status_message=str(e))
-            if trace:
-                trace.end(level="ERROR", status_message=f"Static analysis failed: {str(e)}")
             return {
-                **state,
                 "codebase_analysis": {"error": f"Static analysis failed: {str(e)}"},
             }
 
     # Step 2: LLM-enhanced analysis (if LLM provided)
     llm_analysis = None
     if llm:
-        with obs.span("llm_analysis", trace=trace) as span:
+        with obs.span("llm_analysis") as span:
             try:
                 llm_analysis = _perform_llm_analysis(codebase_path, static_analysis, llm)
                 span.end(output={
@@ -171,20 +162,11 @@ def analyze_codebase_node(
                 span.end(level="WARNING", status_message=str(e))
 
     # Merge analyses
-    with obs.span("merge_analyses", trace=trace) as span:
+    with obs.span("merge_analyses") as span:
         final_analysis = _merge_analyses(static_analysis, llm_analysis)
         span.end(output={"has_llm_analysis": llm_analysis is not None})
 
-    if trace:
-        trace.end(output={
-            "dockerfiles": final_analysis.get("dockerfiles_found", []),
-            "language": final_analysis.get("dependencies", {}).get("language") if final_analysis.get("dependencies") else None,
-            "env_vars_count": len(final_analysis.get("env_vars_required", [])),
-            "errors_count": len(final_analysis.get("errors", [])),
-        })
-
     return {
-        **state,
         "codebase_analysis": final_analysis,
     }
 

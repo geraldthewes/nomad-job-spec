@@ -12,8 +12,6 @@ and the user confirms (or overrides).
 import logging
 from typing import Any, Literal
 
-from src.observability import get_observability
-
 logger = logging.getLogger(__name__)
 
 
@@ -27,20 +25,10 @@ def confirm_dockerfile_node(state: dict[str, Any]) -> dict[str, Any]:
         state: Current graph state.
 
     Returns:
-        Unchanged state (pass-through node).
+        Empty dict (no state changes - pass-through node).
     """
-    obs = get_observability()
-    trace = obs.create_trace(
-        name="confirm_dockerfile_node",
-        input={
-            "dockerfile_used": state.get("build_system_analysis", {}).get("dockerfile_used"),
-            "dockerfiles_found": state.get("dockerfiles_found", []),
-        },
-    )
-
     build_analysis = state.get("build_system_analysis", {})
     dockerfile_used = build_analysis.get("dockerfile_used")
-    dockerfiles_found = state.get("dockerfiles_found", [])
     selected = state.get("selected_dockerfile")
 
     # Log current state for debugging
@@ -52,14 +40,7 @@ def confirm_dockerfile_node(state: dict[str, Any]) -> dict[str, Any]:
     if selected:
         logger.info(f"Dockerfile already selected: {selected}")
 
-    if trace:
-        trace.end(output={
-            "dockerfile_used": dockerfile_used,
-            "selected_dockerfile": selected,
-            "awaiting_confirmation": not selected and dockerfile_used is not None,
-        })
-
-    return state
+    return {}  # Pass-through - no state changes
 
 
 def should_confirm_dockerfile(state: dict[str, Any]) -> Literal["confirm", "skip"]:

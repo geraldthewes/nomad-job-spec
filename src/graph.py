@@ -1,7 +1,6 @@
 """LangGraph workflow definition for the Nomad Job Spec Agent."""
 
-from typing import Any, Annotated, Literal
-from dataclasses import dataclass, field
+from typing import Any, Annotated, Literal, NotRequired, TypedDict
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
@@ -27,14 +26,14 @@ from src.nodes.deploy import create_deploy_node, create_verify_node
 from config.settings import Settings, get_settings
 
 
-# Type for the state with message history
-class AgentState(dict):
+class AgentState(TypedDict, total=False):
     """State for the Nomad Job Spec Agent.
 
-    This is a TypedDict-like class for use with LangGraph.
+    Uses TypedDict for proper type checking and LangGraph integration.
+    Fields marked with NotRequired are optional and may not be present.
     """
 
-    # Input
+    # Input (required)
     prompt: str
     codebase_path: str
 
@@ -45,7 +44,7 @@ class AgentState(dict):
     # Analysis
     codebase_analysis: dict[str, Any]
 
-    # Conversation
+    # Conversation - messages uses add_messages reducer for proper merging
     messages: Annotated[list[BaseMessage], add_messages]
     questions: list[str]
     user_responses: dict[str, str]
@@ -71,12 +70,14 @@ class AgentState(dict):
     cluster_id: str
 
     # Infrastructure enrichment (from enrich node)
+    app_name: str  # Extracted app name (set by enrich node)
     env_var_configs: list[dict[str, Any]]  # Multi-source env var configurations
     vault_suggestions: dict[str, Any]  # Legacy, for backward compatibility
     consul_conventions: dict[str, Any]
     consul_services: dict[str, Any]
     fabio_validation: dict[str, Any]
     nomad_info: dict[str, Any]
+    infra_issues: list[dict[str, str]]  # Infrastructure connection issues
 
     # Pre-deployment validation
     pre_deploy_validation: dict[str, Any]
@@ -242,8 +243,8 @@ def create_workflow(
     validate_node = create_validate_node(settings)
     fix_node = create_fix_node(llm)
 
-    # Build graph
-    workflow = StateGraph(dict)
+    # Build graph with typed state
+    workflow = StateGraph(AgentState)
 
     # Add nodes
     workflow.add_node("discover_sources", discover_sources_node)
@@ -337,7 +338,8 @@ def compile_graph(
         settings: Application settings.
         include_deployment: Whether to include deployment nodes.
         enable_checkpointing: Whether to enable state checkpointing for HitL.
-        session_id: Optional session ID for LangFuse trace grouping.
+        session_id: Deprecated - no longer used. Tracing is now handled via
+            callback handler passed to graph.stream() in main.py.
 
     Returns:
         Compiled graph ready for execution.
@@ -345,17 +347,9 @@ def compile_graph(
     if settings is None:
         settings = get_settings()
 
-    # Wire up LangFuse callbacks to LLM if enabled
-    from src.observability import get_observability
-
-    obs = get_observability(settings)
-    if obs.is_enabled():
-        handler = obs.get_handler(
-            trace_name="nomad-job-spec",
-            session_id=session_id,
-        )
-        if handler:
-            llm = llm.with_config(callbacks=[handler])
+    # NOTE: LangFuse tracing is now handled at graph.stream() time via config callbacks,
+    # not at compile time. This allows proper nesting of LLM calls under LangGraph nodes.
+    # See main.py for the callback handler setup.
 
     workflow = create_workflow(llm, settings, include_deployment)
 

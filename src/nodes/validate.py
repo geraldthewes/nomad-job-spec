@@ -55,10 +55,6 @@ def create_validate_node(
         - deployment_status: Set to 'blocked' if validation fails
         """
         obs = get_observability()
-        trace = obs.create_trace(
-            name="validate_node",
-            input={"job_name": state.get("job_name", "unknown")},
-        )
 
         errors: list[str] = []
         warnings: list[str] = []
@@ -68,19 +64,19 @@ def create_validate_node(
         vault_suggestions = state.get("vault_suggestions", {})
 
         # 1. Validate Fabio routes (STRICT MODE)
-        with obs.span("validate_fabio_routes", trace=trace) as span:
+        with obs.span("validate_fabio_routes") as span:
             fabio_errors = _validate_fabio_routes(job_config, fabio_validation)
             errors.extend(fabio_errors)
             span.end(output={"errors": fabio_errors, "count": len(fabio_errors)})
 
         # 2. Validate Vault paths
-        with obs.span("validate_vault_paths", trace=trace) as span:
+        with obs.span("validate_vault_paths") as span:
             vault_warnings = _validate_vault_paths(job_config, vault_suggestions)
             warnings.extend(vault_warnings)
             span.end(output={"warnings": vault_warnings, "count": len(vault_warnings)})
 
         # 3. Validate HCL syntax (if available)
-        with obs.span("check_hcl_syntax", trace=trace) as span:
+        with obs.span("check_hcl_syntax") as span:
             hcl_valid = state.get("hcl_valid", True)
             validation_error = state.get("validation_error")
             if not hcl_valid and validation_error:
@@ -98,28 +94,20 @@ def create_validate_node(
             "warning_count": len(warnings),
         }
 
-        # Update deployment status if validation fails
-        new_state = {
-            **state,
+        # Build partial state update
+        updates: dict[str, Any] = {
             "pre_deploy_validation": validation_result,
         }
 
         if not passed:
-            new_state["deployment_status"] = "blocked"
-            new_state["deployment_error"] = "; ".join(errors)
+            updates["deployment_status"] = "blocked"
+            updates["deployment_error"] = "; ".join(errors)
             logger.error(f"Pre-deployment validation failed: {errors}")
         else:
             if warnings:
                 logger.warning(f"Pre-deployment warnings: {warnings}")
 
-        if trace:
-            trace.end(output={
-                "passed": passed,
-                "error_count": len(errors),
-                "warning_count": len(warnings),
-            })
-
-        return new_state
+        return updates
 
     return validate_node
 

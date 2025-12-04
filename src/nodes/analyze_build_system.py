@@ -139,13 +139,6 @@ def analyze_build_system_node(
         Updated state with 'build_system_analysis' field.
     """
     obs = get_observability()
-    trace = obs.create_trace(
-        name="analyze_build_system_node",
-        input={
-            "discovered_sources": state.get("discovered_sources"),
-            "codebase_path": state.get("codebase_path"),
-        },
-    )
 
     discovered_sources = state.get("discovered_sources", {})
     codebase_path = state.get("codebase_path", "")
@@ -161,10 +154,7 @@ def analyze_build_system_node(
 
     if not discovered_sources:
         logger.info("No sources discovered, skipping build system analysis")
-        if trace:
-            trace.end(output={"result": "no_sources"})
         return {
-            **state,
             "build_system_analysis": {
                 **default_result,
                 "reasoning": "No source files discovered",
@@ -173,10 +163,7 @@ def analyze_build_system_node(
 
     if not llm:
         logger.warning("No LLM provided, skipping build system analysis")
-        if trace:
-            trace.end(output={"result": "no_llm"})
         return {
-            **state,
             "build_system_analysis": {
                 **default_result,
                 "reasoning": "No LLM available for analysis",
@@ -185,7 +172,7 @@ def analyze_build_system_node(
 
     # Step 1: Read content of all discovered files
     files_content = {}
-    with obs.span("read_discovered_files", trace=trace) as span:
+    with obs.span("read_discovered_files") as span:
         for source_type, file_path in discovered_sources.items():
             content = _read_file_safely(file_path)
             if content:
@@ -201,10 +188,7 @@ def analyze_build_system_node(
         span.end(output={"files_read": list(files_content.keys())})
 
     if not files_content:
-        if trace:
-            trace.end(output={"result": "no_readable_files"})
         return {
-            **state,
             "build_system_analysis": {
                 **default_result,
                 "reasoning": "Could not read any discovered files",
@@ -219,8 +203,8 @@ def analyze_build_system_node(
 
     context = "\n".join(context_parts)
 
-    # Step 3: Call LLM
-    with obs.span("llm_analysis", trace=trace) as span:
+    # Step 3: Call LLM (auto-traced by callback handler)
+    with obs.span("llm_analysis") as span:
         try:
             prompt = _get_prompt()
             messages = [
@@ -271,12 +255,6 @@ def analyze_build_system_node(
             }
             span.end(level="ERROR", status_message=str(e))
 
-    if trace:
-        trace.end(output={
-            "mechanism": result.get("mechanism"),
-            "config_path": result.get("config_path"),
-        })
-
     logger.info(
         f"Build system analysis: mechanism={result.get('mechanism')}, "
         f"config_path={result.get('config_path')}, "
@@ -284,7 +262,6 @@ def analyze_build_system_node(
     )
 
     return {
-        **state,
         "build_system_analysis": result,
     }
 

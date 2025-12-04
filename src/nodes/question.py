@@ -123,7 +123,6 @@ def generate_questions_node(state: dict[str, Any]) -> dict[str, Any]:
     questions.append("How many instances should be deployed initially?")
 
     return {
-        **state,
         "questions": questions,
     }
 
@@ -143,7 +142,7 @@ def collect_responses_node(state: dict[str, Any]) -> dict[str, Any]:
     """
     questions = state.get("questions", [])
     if not questions:
-        return state
+        return {}  # Return empty partial update - no changes needed
 
     # Interrupt and wait for user responses
     # The interrupt() call pauses here and returns whatever value
@@ -151,7 +150,6 @@ def collect_responses_node(state: dict[str, Any]) -> dict[str, Any]:
     user_responses = interrupt(questions)
 
     return {
-        **state,
         "user_responses": user_responses,
     }
 

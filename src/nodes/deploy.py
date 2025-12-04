@@ -36,7 +36,6 @@ def deploy_node(state: dict[str, Any], settings: Settings | None = None) -> dict
     logger.info(f"[STUB] Deploying job: {job_name}")
 
     return {
-        **state,
         "deployment_status": "success",  # Stub returns success
         "job_id": f"stub-{job_name}",
     }
@@ -66,7 +65,6 @@ def verify_node(state: dict[str, Any], settings: Settings | None = None) -> dict
     logger.info(f"[STUB] Verifying deployment for job: {job_id}")
 
     return {
-        **state,
         "deployment_status": "success",
     }
 

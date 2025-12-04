@@ -37,19 +37,12 @@ def merge_extractions_node(state: dict[str, Any]) -> dict[str, Any]:
         Updated state with 'merged_extraction' field.
     """
     obs = get_observability()
-    trace = obs.create_trace(
-        name="merge_extractions_node",
-        input={"extractions_count": len(state.get("extractions", []))},
-    )
 
     extractions = state.get("extractions", [])
 
     if not extractions:
         logger.info("No extractions to merge")
-        if trace:
-            trace.end(output={"merged": False})
         return {
-            **state,
             "merged_extraction": {},
             "extraction_sources": {},
         }
@@ -66,7 +59,7 @@ def merge_extractions_node(state: dict[str, Any]) -> dict[str, Any]:
 
     sorted_extractions = sorted(extractions, key=get_priority, reverse=True)
 
-    with obs.span("merge", trace=trace) as span:
+    with obs.span("merge") as span:
         merged = {}
         sources = {}  # Track which source provided each field
 
@@ -136,16 +129,7 @@ def merge_extractions_node(state: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
-    if trace:
-        trace.end(
-            output={
-                "merged_fields": list(merged.keys()),
-                "primary_source": sorted_extractions[0].get("source_type") if sorted_extractions else None,
-            }
-        )
-
     return {
-        **state,
         "merged_extraction": merged,
         "extraction_sources": sources,
     }

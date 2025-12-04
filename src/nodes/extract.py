@@ -38,14 +38,6 @@ def extract_node(state: dict[str, Any]) -> dict[str, Any]:
         Updated state with 'extractions' field containing list of ExtractionResult dicts.
     """
     obs = get_observability()
-    trace = obs.create_trace(
-        name="extract_node",
-        input={
-            "codebase_path": state.get("codebase_path"),
-            "discovered_sources": state.get("discovered_sources"),
-            "build_system_analysis": state.get("build_system_analysis"),
-        },
-    )
 
     discovered_sources = state.get("discovered_sources", {})
     build_analysis = state.get("build_system_analysis", {})
@@ -54,7 +46,7 @@ def extract_node(state: dict[str, Any]) -> dict[str, Any]:
     extracted_files: set[str] = set()  # Track files we've already extracted
 
     # Step 1: Use build_system_analysis if available
-    with obs.span("extract_from_analysis", trace=trace) as span:
+    with obs.span("extract_from_analysis") as span:
         mechanism = build_analysis.get("mechanism")
         config_path = build_analysis.get("config_path")
 
@@ -99,7 +91,7 @@ def extract_node(state: dict[str, Any]) -> dict[str, Any]:
             span.end(output={"success": False, "reason": "no_analysis"})
 
     # Step 2: Process discovered sources (skip files already extracted)
-    with obs.span("run_extractors", trace=trace) as span:
+    with obs.span("run_extractors") as span:
         for source_type, file_path in discovered_sources.items():
             # Skip if we already extracted this file via build analysis
             if file_path in extracted_files:
@@ -124,7 +116,7 @@ def extract_node(state: dict[str, Any]) -> dict[str, Any]:
                 continue
 
             # Run the extraction
-            with obs.span(f"extract_{source_type}", trace=trace) as extract_span:
+            with obs.span(f"extract_{source_type}") as extract_span:
                 try:
                     result = extractor.extract(file_path, codebase_path)
                     extractions.append(result.to_dict())
@@ -147,16 +139,7 @@ def extract_node(state: dict[str, Any]) -> dict[str, Any]:
 
         span.end(output={"extractions_count": len(extractions)})
 
-    if trace:
-        trace.end(
-            output={
-                "extractions_count": len(extractions),
-                "source_types": [e.get("source_type") for e in extractions],
-            }
-        )
-
     return {
-        **state,
         "extractions": extractions,
     }
 

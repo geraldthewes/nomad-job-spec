@@ -180,10 +180,6 @@ def generate_spec_node(
         Updated state with 'job_spec' (HCL string) and 'job_config' fields.
     """
     obs = get_observability()
-    trace = obs.create_trace(
-        name="generate_node",
-        input={"prompt": state.get("prompt", "")[:200]},
-    )
 
     settings = get_settings()
 
@@ -205,7 +201,7 @@ def generate_spec_node(
     network_mode = _extract_network_mode(user_responses)
 
     # Build context for LLM with enrichment data
-    with obs.span("build_generation_context", trace=trace) as span:
+    with obs.span("build_generation_context") as span:
         context = _build_generation_context(
             analysis,
             user_responses,
@@ -221,8 +217,8 @@ def generate_spec_node(
     # Get the generation prompt
     generation_prompt = _get_generation_prompt()
 
-    # Query LLM for configuration
-    with obs.span("llm_generate", trace=trace, input={"prompt_length": len(generation_prompt)}) as span:
+    # Query LLM for configuration (LLM call auto-traced by callback handler)
+    with obs.span("llm_generate", input={"prompt_length": len(generation_prompt)}) as span:
         messages = [
             SystemMessage(content=generation_prompt),
             HumanMessage(content=context),
@@ -234,7 +230,7 @@ def generate_spec_node(
 
     # Parse LLM response into JobConfig
     config_dict = None
-    with obs.span("parse_llm_response", trace=trace) as span:
+    with obs.span("parse_llm_response") as span:
         try:
             config_dict = _parse_llm_response(response_text)
             # Pass nomad_info, env_var_configs, and network_mode for proper configuration
@@ -254,24 +250,16 @@ def generate_spec_node(
             span.end(level="WARNING", status_message=f"Using fallback config: {str(e)}")
 
     # Generate HCL
-    with obs.span("generate_hcl", trace=trace, input={"job_name": config.job_name}) as span:
+    with obs.span("generate_hcl", input={"job_name": config.job_name}) as span:
         hcl_content = generate_hcl(config)
         span.end(output={"hcl_length": len(hcl_content)})
 
     # Validate HCL
-    with obs.span("validate_hcl", trace=trace) as span:
+    with obs.span("validate_hcl") as span:
         is_valid, validation_error = validate_hcl(hcl_content, settings.nomad_addr)
         span.end(output={"is_valid": is_valid, "error": validation_error})
 
-    if trace:
-        trace.end(output={
-            "job_name": config.job_name,
-            "hcl_valid": is_valid,
-            "hcl_length": len(hcl_content),
-        })
-
     return {
-        **state,
         "job_spec": hcl_content,
         "job_config": config_dict,
         "job_name": config.job_name,
@@ -682,19 +670,12 @@ def regenerate_spec_with_fix(
     """
     obs = get_observability()
     iteration = state.get("iteration_count", 0) + 1
-    trace = obs.create_trace(
-        name="fix_node",
-        input={
-            "iteration": iteration,
-            "error": state.get("deployment_error", "Unknown error")[:200],
-        },
-    )
 
     error = state.get("deployment_error", "Unknown error")
     current_spec = state.get("job_spec", "")
     memories = state.get("relevant_memories", [])
 
-    with obs.span("build_fix_prompt", trace=trace) as span:
+    with obs.span("build_fix_prompt") as span:
         fix_prompt = f"""The previous job specification failed to deploy with the following error:
 
 ERROR: {error}
@@ -720,7 +701,7 @@ Output ONLY a valid JSON object with the fixed job configuration.
     # Get the fix system prompt
     fix_system_prompt = _get_fix_prompt()
 
-    with obs.span("llm_fix", trace=trace) as span:
+    with obs.span("llm_fix") as span:
         messages = [
             SystemMessage(content=fix_system_prompt),
             HumanMessage(content=fix_prompt),
@@ -732,7 +713,7 @@ Output ONLY a valid JSON object with the fixed job configuration.
 
     settings = get_settings()
 
-    with obs.span("parse_and_build_config", trace=trace) as span:
+    with obs.span("parse_and_build_config") as span:
         try:
             config_dict = _parse_llm_response(response_text)
             config = _build_job_config(config_dict, state.get("codebase_analysis", {}), settings)
@@ -743,20 +724,12 @@ Output ONLY a valid JSON object with the fixed job configuration.
             config = _increment_resources(current_config, error, settings)
             span.end(level="WARNING", status_message=f"Using resource increment: {str(e)}", output={"fix_method": "increment"})
 
-    with obs.span("generate_and_validate_hcl", trace=trace) as span:
+    with obs.span("generate_and_validate_hcl") as span:
         hcl_content = generate_hcl(config)
         is_valid, validation_error = validate_hcl(hcl_content, settings.nomad_addr)
         span.end(output={"is_valid": is_valid, "hcl_length": len(hcl_content)})
 
-    if trace:
-        trace.end(output={
-            "job_name": config.job_name,
-            "iteration": iteration,
-            "hcl_valid": is_valid,
-        })
-
     return {
-        **state,
         "job_spec": hcl_content,
         "job_config": config.__dict__ if hasattr(config, "__dict__") else {},
         "job_name": config.job_name,

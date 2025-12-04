@@ -52,39 +52,31 @@ def discover_sources_node(state: dict[str, Any]) -> dict[str, Any]:
         Updated state with 'discovered_sources' and 'dockerfiles_found' fields.
     """
     obs = get_observability()
-    trace = obs.create_trace(
-        name="discover_sources_node",
-        input={"codebase_path": state.get("codebase_path")},
-    )
 
     codebase_path = state.get("codebase_path")
     if not codebase_path:
-        if trace:
-            trace.update(level="ERROR", status_message="No codebase path provided")
+        logger.error("No codebase path provided")
         return {
-            **state,
             "discovered_sources": {},
             "dockerfiles_found": [],
             "selected_dockerfile": None,
         }
 
     # Handle git URLs - clone first if needed
+    codebase_path_changed = False
     if codebase_path.startswith(("http://", "https://", "git@")):
         from src.tools.codebase import clone_repository
 
-        with obs.span("clone_repository", trace=trace, input={"url": codebase_path}) as span:
+        with obs.span("clone_repository", input={"url": codebase_path}) as span:
             codebase_path = clone_repository(codebase_path)
             span.end(output={"cloned_path": codebase_path})
-            # Update state with cloned path
-            state = {**state, "codebase_path": codebase_path}
+            codebase_path_changed = True
 
     codebase = Path(codebase_path)
 
     if not codebase.exists():
-        if trace:
-            trace.end(level="ERROR", status_message=f"Path does not exist: {codebase_path}")
+        logger.error(f"Path does not exist: {codebase_path}")
         return {
-            **state,
             "discovered_sources": {},
             "dockerfiles_found": [],
             "selected_dockerfile": None,
@@ -92,7 +84,7 @@ def discover_sources_node(state: dict[str, Any]) -> dict[str, Any]:
 
     discovered = {}
 
-    with obs.span("scan_sources", trace=trace) as span:
+    with obs.span("scan_sources") as span:
         # Scan for each category of source file
         for source_type, patterns in SOURCE_FILE_PATTERNS.items():
             found = False
@@ -175,7 +167,7 @@ def discover_sources_node(state: dict[str, Any]) -> dict[str, Any]:
         span.end(output={"discovered_count": len(discovered), "sources": list(discovered.keys())})
 
     # Find all Dockerfiles (original discover.py behavior)
-    with obs.span("find_dockerfiles", trace=trace, input={"path": str(codebase)}) as span:
+    with obs.span("find_dockerfiles", input={"path": str(codebase)}) as span:
         dockerfiles_found = []
         for dockerfile_path in codebase.glob("**/Dockerfile*"):
             # Skip directories, backup files, and documentation
@@ -211,20 +203,17 @@ def discover_sources_node(state: dict[str, Any]) -> dict[str, Any]:
     if discovered:
         logger.info(f"Discovered sources: {list(discovered.keys())}")
 
-    if trace:
-        trace.end(
-            output={
-                "discovered_sources": discovered,
-                "dockerfiles_found": dockerfiles_found,
-            }
-        )
-
-    return {
-        **state,
+    result = {
         "discovered_sources": discovered,
         "dockerfiles_found": dockerfiles_found,
         "selected_dockerfile": None,
     }
+
+    # Include updated codebase_path if it was changed (git clone)
+    if codebase_path_changed:
+        result["codebase_path"] = codebase_path
+
+    return result
 
 
 def create_discover_sources_node():

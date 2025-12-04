@@ -111,10 +111,6 @@ def create_enrich_node(
         services are unavailable, it will continue with empty/default values.
         """
         obs = get_observability()
-        trace = obs.create_trace(
-            name="enrich_node",
-            input={"app_name": _extract_app_name(state)},
-        )
 
         analysis = state.get("codebase_analysis", {})
         app_name = _extract_app_name(state)
@@ -126,7 +122,7 @@ def create_enrich_node(
         fabio = None
         infra_issues: list[dict[str, str]] = []
 
-        with obs.span("init_vault_client", trace=trace) as span:
+        with obs.span("init_vault_client") as span:
             try:
                 vault = get_vault_client()
                 span.end(output={"status": "connected"})
@@ -142,7 +138,7 @@ def create_enrich_node(
                 infra_issues.append({"service": "Vault", "error": msg})
                 span.end(level="WARNING", status_message=msg)
 
-        with obs.span("init_consul_client", trace=trace) as span:
+        with obs.span("init_consul_client") as span:
             try:
                 consul = get_consul_client()
                 span.end(output={"status": "connected"})
@@ -158,7 +154,7 @@ def create_enrich_node(
                 infra_issues.append({"service": "Consul", "error": msg})
                 span.end(level="WARNING", status_message=msg)
 
-        with obs.span("init_fabio_client", trace=trace) as span:
+        with obs.span("init_fabio_client") as span:
             try:
                 fabio = get_fabio_client()
                 span.end(output={"status": "connected"})
@@ -180,7 +176,7 @@ def create_enrich_node(
         nomad_info: dict[str, Any] = {}
 
         # 1. Load conventions from Consul (or use defaults)
-        with obs.span("load_conventions", trace=trace, input={"source": "consul" if consul else "defaults"}) as span:
+        with obs.span("load_conventions", input={"source": "consul" if consul else "defaults"}) as span:
             if consul is None:
                 consul_conventions = _default_conventions()
                 logger.info("Using default conventions (Consul unavailable)")
@@ -197,7 +193,7 @@ def create_enrich_node(
 
         # 2. Update Vault conventions if found and vault client available
         if vault is not None:
-            with obs.span("set_vault_conventions", trace=trace) as span:
+            with obs.span("set_vault_conventions") as span:
                 vault_conv = consul_conventions.get("vault", {})
                 if vault_conv:
                     try:
@@ -221,7 +217,7 @@ def create_enrich_node(
         env_vars = analysis.get("env_vars_required", [])
         env_var_configs: list[dict] = []
 
-        with obs.span("suggest_env_configs", trace=trace, input={"env_vars": env_vars, "count": len(env_vars)}) as span:
+        with obs.span("suggest_env_configs", input={"env_vars": env_vars, "count": len(env_vars)}) as span:
             if env_vars:
                 try:
                     # Use new multi-source suggestion logic
@@ -251,7 +247,7 @@ def create_enrich_node(
         port_analysis = state.get("port_analysis", {})
         port_env_mapping = port_analysis.get("recommended_env_mapping", {})
         if port_env_mapping:
-            with obs.span("apply_port_env_mapping", trace=trace, input={"mapping": list(port_env_mapping.keys())}) as span:
+            with obs.span("apply_port_env_mapping", input={"mapping": list(port_env_mapping.keys())}) as span:
                 for env_var, nomad_ref in port_env_mapping.items():
                     # Find existing config for this env var and update it
                     found = False
@@ -274,7 +270,7 @@ def create_enrich_node(
                 span.end(output={"env_var": env_var, "mapping": nomad_ref})
 
         # Also maintain legacy vault_suggestions for backward compatibility
-        with obs.span("suggest_vault_mappings", trace=trace, input={"env_vars_count": len(env_vars)}) as span:
+        with obs.span("suggest_vault_mappings", input={"env_vars_count": len(env_vars)}) as span:
             if env_vars and vault is not None:
                 try:
                     suggestions = vault.suggest_mappings(env_vars, app_name)
@@ -298,7 +294,7 @@ def create_enrich_node(
                 span.end(output={"skipped": True, "reason": "no_env_vars_or_vault"})
 
         # 4. Check Consul for service dependencies
-        with obs.span("query_consul_services", trace=trace) as span:
+        with obs.span("query_consul_services") as span:
             if consul is not None:
                 try:
                     services = consul.list_services()
@@ -326,7 +322,7 @@ def create_enrich_node(
                 span.end(output={"skipped": True, "reason": "consul_unavailable"})
 
         # 5. Check Fabio route availability
-        with obs.span("validate_fabio_routes", trace=trace, input={"app_name": app_name}) as span:
+        with obs.span("validate_fabio_routes", input={"app_name": app_name}) as span:
             if fabio is not None:
                 try:
                     fabio_conventions = consul_conventions.get("fabio", {})
@@ -374,7 +370,7 @@ def create_enrich_node(
                 })
 
         # 6. Get Nomad version info
-        with obs.span("get_nomad_version", trace=trace) as span:
+        with obs.span("get_nomad_version") as span:
             try:
                 version = get_cached_nomad_version(
                     addr=settings.nomad_addr,
@@ -398,17 +394,7 @@ def create_enrich_node(
                 }
                 span.end(level="WARNING", status_message=str(e), output=nomad_info)
 
-        # End the main trace with final output
-        if trace is not None:
-            trace.end(output={
-                "env_var_configs_count": len(env_var_configs),
-                "vault_suggestions_count": len(vault_suggestions.get("suggestions", [])),
-                "consul_services_count": len(consul_services.get("available", [])),
-                "infra_issues_count": len(infra_issues),
-            })
-
         return {
-            **state,
             "app_name": app_name,  # Store extracted app name for later use
             "env_var_configs": env_var_configs,  # Multi-source env var configurations
             "vault_suggestions": vault_suggestions,  # Legacy, for backward compatibility

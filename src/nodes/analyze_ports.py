@@ -194,12 +194,6 @@ def analyze_ports_node(
         )
 
     obs = get_observability()
-    trace = obs.create_trace(
-        name="analyze_ports_node",
-        input={
-            "codebase_path": state.get("codebase_path"),
-        },
-    )
 
     codebase_path = state.get("codebase_path", "")
     discovered_sources = state.get("discovered_sources", {})
@@ -237,8 +231,8 @@ def analyze_ports_node(
 
     context = "\n".join(context_parts)
 
-    # Query LLM with focused prompt
-    with obs.span("llm_detect_port", trace=trace) as span:
+    # Query LLM with focused prompt (LLM call auto-traced by callback handler)
+    with obs.span("llm_detect_port") as span:
         prompt = _get_prompt()
         messages = [
             SystemMessage(content=prompt),
@@ -285,13 +279,6 @@ def analyze_ports_node(
         "recommended_env_mapping": recommended_env_mapping,
     }
 
-    if trace:
-        trace.end(output={
-            "port_type": port_info["type"],
-            "port_value": port_info["value"],
-            "supports_dynamic_port": supports_dynamic_port,
-        })
-
     logger.info(
         f"Port analysis: type={port_info['type']}, "
         f"value={port_info['value']}, "
@@ -299,7 +286,6 @@ def analyze_ports_node(
     )
 
     return {
-        **state,
         "port_analysis": final_analysis,
     }
 
